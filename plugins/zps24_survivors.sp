@@ -32,6 +32,7 @@ public Plugin myinfo =
 #define AMMO_BARRICADE 7          // ammo index of barricade boards (see GetAmmoDef in the manual)
 #define MAX_OPENINGS   64
 
+ConVar g_giveWeapons, g_infiniteAmmo;
 ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOpening, g_debug, g_upperHeight, g_furniture;
 
 Handle g_canAttach;               // SDKCall: bool CWeapon_Barricade::CanAttachBarricade()
@@ -63,6 +64,7 @@ float  g_nextUse[MAXPLAYERS + 1];
 float  g_restockUntil[MAXPLAYERS + 1];
 bool   g_scripted[MAXPLAYERS + 1];
 float  g_lastPos[MAXPLAYERS + 1][3];
+int    g_givenGun[MAXPLAYERS + 1];       // gun spawned in front of the bot, waiting to be picked up
 
 static const char g_guns[][] = { "weapon_glock", "weapon_glock18c", "weapon_usp", "weapon_ppk", "weapon_revolver",
 	"weapon_870", "weapon_supershorty", "weapon_winchester", "weapon_ak47", "weapon_m4", "weapon_mp5" };
@@ -70,7 +72,9 @@ static const char g_guns[][] = { "weapon_glock", "weapon_glock18c", "weapon_usp"
 public void OnPluginStart()
 {
 	g_enable           = CreateConVar("sm_zps24ai_enable", "1", "Enable the ZPS 2.4 survivor AI");
-	g_equipTime        = CreateConVar("sm_zps24ai_equip_time", "30", "Seconds at round start bots spend collecting weapons/ammo before holding out");
+	g_equipTime        = CreateConVar("sm_zps24ai_equip_time", "0", "Seconds at round start bots spend collecting weapons/ammo before holding out (not needed with sm_zps24ai_give_weapons)");
+	g_giveWeapons      = CreateConVar("sm_zps24ai_give_weapons", "1", "Give every survivor bot a random gun");
+	g_infiniteAmmo     = CreateConVar("sm_zps24ai_infinite_ammo", "1", "Keep survivor bots' reserve ammo topped up (no resupplying)");
 	g_radius           = CreateConVar("sm_zps24ai_holdout_radius", "550", "Doors/windows within this distance of the hold-out get barricaded");
 	g_safeDist         = CreateConVar("sm_zps24ai_safe_distance", "260", "Bots with guns back away from zombies closer than this");
 	g_barricaders      = CreateConVar("sm_zps24ai_barricaders", "3", "How many survivor bots barricade at once");
@@ -116,6 +120,7 @@ void ResetRound()
 	{
 		g_job[i] = JOB_NONE;
 		g_carryProp[i] = INVALID_ENT_REFERENCE;
+		g_givenGun[i] = INVALID_ENT_REFERENCE;
 		g_scripted[i] = false;
 		g_restockUntil[i] = 0.0;
 	}
@@ -689,6 +694,71 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 }
 
 // ---------------------------------------------------------------------------------------------
+// Free guns and unlimited ammo
+
+static const char g_giveList[][] = { "weapon_ak47", "weapon_m4", "weapon_mp5", "weapon_870", "weapon_supershorty",
+	"weapon_winchester", "weapon_revolver", "weapon_glock18c", "weapon_usp", "weapon_glock" };
+
+bool HasGun(int client)
+{
+	int size = GetEntPropArraySize(client, Prop_Send, "m_hMyWeapons");
+	for (int i = 0; i < size; i++)
+		if (IsGun(GetEntPropEnt(client, Prop_Send, "m_hMyWeapons", i)))
+			return true;
+	return false;
+}
+
+// Weapons in 2.4 are picked up with E. Spawn a random gun right in front of the bot's face and
+// press the real E button, so the game's normal pickup code runs.
+// Returns true while the bot should stand still and finish picking it up.
+bool ArmBot(int client, NavBot bot)
+{
+	if (!g_giveWeapons.BoolValue || HasGun(client))
+	{
+		g_givenGun[client] = INVALID_ENT_REFERENCE;
+		return false;
+	}
+	if (GetGameTime() < g_nextUse[client])
+		return true;
+
+	int gun = EntRefToEntIndex(g_givenGun[client]);
+	if (gun == INVALID_ENT_REFERENCE || GetEntPropEnt(gun, Prop_Send, "m_hOwnerEntity") != -1)
+	{
+		gun = CreateEntityByName(g_giveList[GetRandomInt(0, sizeof(g_giveList) - 1)]);
+		if (gun == -1)
+			return false;
+		DispatchSpawn(gun);
+		g_givenGun[client] = EntIndexToEntRef(gun);
+	}
+
+	float eye[3], ang[3], fwd[3], spot[3];
+	GetClientEyePosition(client, eye);
+	GetClientEyeAngles(client, ang);
+	ang[0] = 0.0;
+	GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+	ScaleVector(fwd, 30.0);
+	AddVectors(eye, fwd, spot);
+	spot[2] -= 20.0;
+	TeleportEntity(gun, spot, NULL_VECTOR, view_as<float>({0.0, 0.0, 0.0}));
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, spot, LOOK_PRIORITY, 0.6, "Taking a gun");
+	NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.3);
+	g_nextUse[client] = GetGameTime() + 1.0;
+	return true;
+}
+
+void RefillAmmo(int client)
+{
+	if (!g_infiniteAmmo.BoolValue)
+		return;
+	for (int type = 1; type <= 4; type++)          // LightPistol, Magnum, Shotgun, Rifle
+		if (GetEntProp(client, Prop_Send, "m_iAmmo", _, type) < 120)
+			SetEntProp(client, Prop_Send, "m_iAmmo", 120, _, type);
+	if (FindOwnedWeapon(client, "weapon_barricade") != -1 && GetEntProp(client, Prop_Send, "m_iAmmo", _, AMMO_BARRICADE) < 6)
+		SetEntProp(client, Prop_Send, "m_iAmmo", 6, _, AMMO_BARRICADE);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Main loop
 
 Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeType)
@@ -705,6 +775,9 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		g_scripted[client] = false;
 		return Plugin_Stop;                      // let NavBot go collect ammo
 	}
+
+	if (ArmBot(client, bot))
+		return Plugin_Continue;
 
 	OpenDoorAhead(client, bot);
 	float me[3];
@@ -809,8 +882,10 @@ Action Timer_Think(Handle timer)
 		}
 		NavBot bot = NavBotManager.GetNavBotByIndex(client);
 
-		// Out of gun ammo: release the bot for 20 s so NavBot restocks.
-		if (g_restockUntil[client] < GetGameTime() && !HasGunAmmo(client))
+		RefillAmmo(client);
+
+		// Out of gun ammo: release the bot for 20 s so NavBot restocks (only without unlimited ammo).
+		if (!g_infiniteAmmo.BoolValue && g_restockUntil[client] < GetGameTime() && !HasGunAmmo(client))
 		{
 			g_restockUntil[client] = GetGameTime() + 20.0;
 			if (g_job[client] != JOB_NONE) ReleaseJob(client, false);
@@ -849,6 +924,14 @@ Action Timer_Think(Handle timer)
 
 Action Cmd_Status(int args)
 {
+	int bots = 0, armed = 0;
+	for (int i = 1; i <= MaxClients; i++)
+		if (IsClientInGame(i) && IsFakeClient(i) && IsPlayerAlive(i) && GetClientTeam(i) == TEAM_SURVIVORS)
+		{
+			bots++;
+			if (HasGun(i)) armed++;
+		}
+	PrintToServer("[zps24ai] survivor bots with a gun: %d/%d", armed, bots);
 	if (!g_haveHoldout) { PrintToServer("[zps24ai] no hold-out yet"); return Plugin_Handled; }
 	int done = 0;
 	for (int i = 0; i < g_openingCount; i++) if (g_openingDone[i]) done++;
