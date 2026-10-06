@@ -22,7 +22,7 @@ public Plugin myinfo =
 #define TEAM_SURVIVORS 2
 #define TEAM_ZOMBIES   3
 
-ConVar g_enable, g_debug;
+ConVar g_enable, g_debug, g_forceTarget;
 bool   g_scripted[MAXPLAYERS + 1];
 int    g_target[MAXPLAYERS + 1];
 float  g_retarget[MAXPLAYERS + 1];
@@ -30,11 +30,15 @@ float  g_lastPos[MAXPLAYERS + 1][3];
 float  g_stuckSince[MAXPLAYERS + 1];
 int    g_smash[MAXPLAYERS + 1];          // entity reference of the obstacle being attacked
 float  g_smashUntil[MAXPLAYERS + 1];
+int    g_smashHealth[MAXPLAYERS + 1];    // obstacle health when we started hitting it
+int    g_ignore[MAXPLAYERS + 1][4];      // obstacles that didn't break when hit (entity refs)
+float  g_ignoreUntil[MAXPLAYERS + 1][4];
 
 public void OnPluginStart()
 {
 	g_enable = CreateConVar("sm_zps24zombies_enable", "1", "Enable the ZPS 2.4 zombie AI");
 	g_debug  = CreateConVar("sm_zps24zombies_debug", "0", "Log zombie AI decisions");
+	g_forceTarget = CreateConVar("sm_zps24zombies_force_target", "0", "Debug: every zombie hunts this client index (0 = normal)");
 	AutoExecConfig(true, "zps24_zombies");
 }
 
@@ -94,9 +98,45 @@ int PickTarget(int zombie)
 	return ids[GetRandomInt(0, k - 1)];
 }
 
+// Can this entity actually be broken? Big metal furniture is often a prop_physics with no
+// breakable data (no health, takes no damage); hitting it forever is what got zombies stuck.
+bool CanBreak(int ent)
+{
+	if (HasEntProp(ent, Prop_Data, "m_takedamage") && GetEntProp(ent, Prop_Data, "m_takedamage") == 0)
+		return false;
+	char cls[64];
+	GetEntityClassname(ent, cls, sizeof(cls));
+	if (StrContains(cls, "breakable") != -1)
+		return true;
+	return HasEntProp(ent, Prop_Data, "m_iHealth") && GetEntProp(ent, Prop_Data, "m_iHealth") > 0;
+}
+
+int EntHealth(int ent)
+{
+	return HasEntProp(ent, Prop_Data, "m_iHealth") ? GetEntProp(ent, Prop_Data, "m_iHealth") : 0;
+}
+
+bool IsIgnored(int client, int ent)
+{
+	int ref = EntIndexToEntRef(ent);
+	for (int i = 0; i < 4; i++)
+		if (g_ignore[client][i] == ref && GetGameTime() < g_ignoreUntil[client][i])
+			return true;
+	return false;
+}
+
+void Ignore(int client, int ent)
+{
+	int slot = 0;
+	for (int i = 1; i < 4; i++)
+		if (g_ignoreUntil[client][i] < g_ignoreUntil[client][slot]) slot = i;
+	g_ignore[client][slot] = EntIndexToEntRef(ent);
+	g_ignoreUntil[client][slot] = GetGameTime() + 60.0;
+}
+
 bool IsSmashable(int ent)
 {
-	if (ent <= MaxClients || !IsValidEntity(ent))
+	if (ent <= MaxClients || !IsValidEntity(ent) || !CanBreak(ent))
 		return false;
 	char cls[64], model[128];
 	GetEntityClassname(ent, cls, sizeof(cls));
@@ -140,13 +180,26 @@ int FindObstacle(int client)
 	float bestDist = 110.0;
 	for (int ent = MaxClients + 1; ent < GetMaxEntities(); ent++)
 	{
-		if (!IsSmashable(ent))
+		if (!IsSmashable(ent) || IsIgnored(client, ent))
 			continue;
 		CenterOf(ent, c);
 		float d = GetVectorDistance(me, c);
 		if (d < bestDist) { bestDist = d; best = ent; }
 	}
 	return best;
+}
+
+// Don't let NavBot try to break unbreakable obstacles (e.g. metal closets) for zombies: detour.
+public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, const float goal[3])
+{
+	int client = bot.Index;
+	if (hitWorld || entity <= MaxClients || !IsValidEntity(entity) || !IsClientInGame(client) || GetClientTeam(client) != TEAM_ZOMBIES)
+		return Plugin_Continue;
+	if (CanBreak(entity) && !IsIgnored(client, entity))
+		return Plugin_Continue;     // NavBot breaks it
+	if (g_us_detourUntil[client] < GetGameTime() && Unstick_RandomSpot(client, g_us_detour[client]))
+		g_us_detourUntil[client] = GetGameTime() + 3.0;
+	return Plugin_Handled;
 }
 
 Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeType)
@@ -160,6 +213,19 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 
 	// Smashing an obstacle: stand still, aim at it and swing.
 	int obstacle = EntRefToEntIndex(g_smash[client]);
+	if (obstacle != INVALID_ENT_REFERENCE && GetGameTime() >= g_smashUntil[client])
+	{
+		// Time's up: if it took no damage, it can't be broken this way. Forget it and go around.
+		if (EntHealth(obstacle) >= g_smashHealth[client])
+		{
+			Ignore(client, obstacle);
+			if (Unstick_RandomSpot(client, g_us_detour[client]))
+				g_us_detourUntil[client] = GetGameTime() + 4.0;
+			Debug("%N: obstacle %d won't break, detouring", client, obstacle);
+		}
+		g_smash[client] = INVALID_ENT_REFERENCE;
+		obstacle = INVALID_ENT_REFERENCE;
+	}
 	if (obstacle != INVALID_ENT_REFERENCE && GetGameTime() < g_smashUntil[client])
 	{
 		Address ctrl = bot.GetPlayerControllerInterface();
@@ -174,7 +240,9 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	if (Unstick_Goal(client, moveGoal))
 		return Plugin_Changed;              // detour around whatever we're stuck on
 
-	if (!IsLiveSurvivor(g_target[client]) || GetGameTime() > g_retarget[client])
+	if (g_forceTarget.IntValue > 0 && IsLiveSurvivor(g_forceTarget.IntValue))
+		g_target[client] = g_forceTarget.IntValue;
+	else if (!IsLiveSurvivor(g_target[client]) || GetGameTime() > g_retarget[client])
 	{
 		g_target[client] = PickTarget(client);
 		g_retarget[client] = GetGameTime() + GetRandomFloat(8.0, 14.0);
@@ -232,7 +300,8 @@ Action Timer_Think(Handle timer)
 			if (obstacle != -1)
 			{
 				g_smash[client] = EntIndexToEntRef(obstacle);
-				g_smashUntil[client] = GetGameTime() + 6.0;
+				g_smashUntil[client] = GetGameTime() + 4.0;
+				g_smashHealth[client] = EntHealth(obstacle);
 				char cls[64];
 				GetEntityClassname(obstacle, cls, sizeof(cls));
 				Debug("%N is stuck, smashing %s", client, cls);

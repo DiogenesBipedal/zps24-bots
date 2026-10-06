@@ -47,6 +47,7 @@ public void OnPluginStart()
 	RegAdminCmd("-zpshook", Cmd_HookOff, ADMFLAG_GENERIC, "Grappling hook release");
 
 	RegServerCmd("sm_zps24_humans", Cmd_Humans, "Print human players' teams and the Carrier");
+	RegConsoleCmd("sm_here", Cmd_Here, "Log your position (chat: !here) for debugging bot movement");
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
 	CreateTimer(1.0, Timer_MarkVolunteers, _, TIMER_REPEAT);
 	CreateTimer(0.5, Timer_SpectatorHud, _, TIMER_REPEAT);
@@ -137,6 +138,18 @@ void MarkVolunteers()
 			SetEntData(i, OFFSET_ZOMBIE_VOLUNTEER, IsFakeClient(i) ? bots : 1 - bots, 1, false);
 		}
 	}
+}
+
+Action Cmd_Here(int client, int args)
+{
+	if (client <= 0)
+		return Plugin_Handled;
+	float pos[3], ang[3];
+	GetClientAbsOrigin(client, pos);
+	GetClientEyeAngles(client, ang);
+	LogMessage("HERE %N at %.0f %.0f %.0f facing yaw %.0f", client, pos[0], pos[1], pos[2], ang[1]);
+	PrintToChat(client, "[ZPS] Logged your position %.0f %.0f %.0f", pos[0], pos[1], pos[2]);
+	return Plugin_Handled;
 }
 
 Action Cmd_Humans(int args)
