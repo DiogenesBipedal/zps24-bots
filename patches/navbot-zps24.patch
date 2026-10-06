@@ -63,6 +63,33 @@ index 040c942..01982b5 100644
  	}
  }
  
+diff --git a/extension/bot/interfaces/playercontrol.cpp b/extension/bot/interfaces/playercontrol.cpp
+index 8e917c2..9e9a0e4 100644
+--- a/extension/bot/interfaces/playercontrol.cpp
++++ b/extension/bot/interfaces/playercontrol.cpp
+@@ -1,4 +1,5 @@
+ #include NAVBOT_PCH_FILE
++#include <algorithm>
+ #include <extension.h>
+ #include <bot/basebot.h>
+ #include <sdkports/debugoverlay_shared.h>
+@@ -268,6 +269,8 @@ void IPlayerController::RunLook()
+ 
+ 	finalAngles.x = AngleNormalize(finalAngles.x);
+ 	finalAngles.y = AngleNormalize(finalAngles.y);
++	// Pitch past straight up/down flips the aim and made ZPS 2.4's FireBullets crash.
++	finalAngles.x = std::clamp(finalAngles.x, -89.0f, 89.0f);
+ 
+ 	if (me->IsDebugging(BOTDEBUG_LOOK))
+ 	{
+@@ -450,6 +453,7 @@ void IPlayerController::SnapAimAt(const Vector& pos, const LookPriority priority
+ 
+ 	lookAngles.x = AngleNormalize(lookAngles.x);
+ 	lookAngles.y = AngleNormalize(lookAngles.y);
++	lookAngles.x = std::clamp(lookAngles.x, -89.0f, 89.0f);
+ 
+ 	SnapAimAt(lookAngles, priority);
+ }
 diff --git a/extension/extension.cpp b/extension/extension.cpp
 index 5ce290b..491af0b 100644
 --- a/extension/extension.cpp

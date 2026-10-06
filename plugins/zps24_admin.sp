@@ -278,6 +278,7 @@ void ShowMainMenu(int client)
 	m.AddItem("restart", "Restart map (new round)");
 	m.AddItem("ai", "Toggle survivor AI");
 	m.AddItem("me", "Me: noclip / god / weapons");
+	m.AddItem("spawn", "Spawn ammo / items / objects");
 	m.AddItem("spectate", "Spectate (shows bot info)");
 	m.AddItem("radio", "Radio");
 	m.Display(client, MENU_TIME_FOREVER);
@@ -309,6 +310,7 @@ int Menu_Main(Menu menu, MenuAction action, int client, int item)
 		ShowMainMenu(client);
 	}
 	else if (StrEqual(info, "me"))          ShowMeMenu(client);
+	else if (StrEqual(info, "spawn"))       ShowSpawnMenu(client);
 	else if (StrEqual(info, "radio"))       FakeClientCommand(client, "sm_radio");
 	else if (StrEqual(info, "spectate"))
 	{
@@ -458,4 +460,192 @@ int Menu_Me(Menu menu, MenuAction action, int client, int item)
 	}
 	ShowMeMenu(client);
 	return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Spawn menu: put ammo, items, weapons or furniture where the admin is aiming
+
+static const char g_spawnAmmo[][][] = {
+	{ "item_ammo_pistol",       "Pistol ammo" },
+	{ "item_ammo_pistol_large", "Pistol ammo (large)" },
+	{ "item_ammo_357",          "Magnum ammo" },
+	{ "item_ammo_357_large",    "Magnum ammo (large)" },
+	{ "item_box_buckshot",      "Shotgun shells" },
+	{ "item_ammo_smg1",         "Rifle ammo" },
+	{ "item_ammo_smg1_large",   "Rifle ammo (large)" },
+	{ "item_healthkit",         "Health kit" },
+	{ "item_healthvial",        "Health vial" }
+};
+
+static const char g_spawnWeapons[][][] = {
+	{ "weapon_ak47", "AK47" }, { "weapon_m4", "M4" }, { "weapon_mp5", "MP5" }, { "weapon_870", "Remington 870" },
+	{ "weapon_supershorty", "Super Shorty" }, { "weapon_winchester", "Winchester" }, { "weapon_revolver", "Revolver" },
+	{ "weapon_glock18c", "Glock 18c" }, { "weapon_glock", "Glock" }, { "weapon_usp", "USP" }, { "weapon_ppk", "PPK" },
+	{ "weapon_barricade", "Barricade hammer" }, { "weapon_frag", "Grenade" }, { "weapon_ied", "IED" },
+	{ "weapon_axe", "Axe" }, { "weapon_machete", "Machete" }, { "weapon_sledgehammer", "Sledgehammer" },
+	{ "weapon_crowbar", "Crowbar" }, { "weapon_bat_aluminum", "Aluminium bat" }, { "weapon_shovel", "Shovel" },
+	{ "weapon_plank", "Plank" }, { "weapon_pipe", "Pipe" }, { "weapon_golf", "Golf club" }, { "weapon_fryingpan", "Frying pan" }
+};
+
+// Physics props that 2.4 maps ship with (so both the server and clients have them).
+static const char g_spawnProps[][][] = {
+	{ "models/props_junk/wood_crate001a.mdl",                  "Wooden crate" },
+	{ "models/props_junk/wood_crate002a.mdl",                  "Big wooden crate" },
+	{ "models/props_c17/oildrum001.mdl",                       "Oil drum" },
+	{ "models/props_c17/oildrum001_explosive.mdl",             "Explosive barrel" },
+	{ "models/props_c17/lockers001a.mdl",                      "Lockers" },
+	{ "models/props_wasteland/controlroom_storagecloset001a.mdl", "Metal closet" },
+	{ "models/props_wasteland/controlroom_filecabinet002a.mdl", "Filing cabinet" },
+	{ "models/props_interiors/furniture_shelf01a.mdl",         "Shelf" },
+	{ "models/props_wasteland/kitchen_shelf001a.mdl",          "Kitchen shelf" },
+	{ "models/props_wasteland/controlroom_desk001a.mdl",       "Desk" },
+	{ "models/props_wasteland/cafeteria_table001a.mdl",        "Table" },
+	{ "models/props_c17/furnituredrawer001a.mdl",              "Drawer" },
+	{ "models/props_c17/furniturecouch001a.mdl",               "Couch" },
+	{ "models/props_c17/furniturebed001a.mdl",                 "Bed" },
+	{ "models/props_c17/furnituremattress001a.mdl",            "Mattress" },
+	{ "models/props_c17/furniturechair001a.mdl",               "Chair" },
+	{ "models/props_interiors/vendingmachinesoda01a.mdl",      "Vending machine" },
+	{ "models/props_junk/trashdumpster01a.mdl",                "Dumpster" },
+	{ "models/props_junk/pushcart01a.mdl",                     "Push cart" },
+	{ "models/props_wasteland/barricade001a.mdl",              "Road barricade" },
+	{ "models/props_junk/wood_pallet001a.mdl",                 "Pallet" },
+	{ "models/props_debris/metal_panel02a.mdl",                "Metal panel" },
+	{ "models/props_wasteland/dockplank01b.mdl",               "Plank" },
+	{ "models/props_junk/trafficcone001a.mdl",                 "Traffic cone" },
+	{ "models/props_junk/gascan001a.mdl",                      "Gas can" }
+};
+
+int g_spawnPage[MAXPLAYERS + 1];   // 0 ammo/health, 1 weapons, 2 objects
+
+void ShowSpawnMenu(int client)
+{
+	Menu m = new Menu(Menu_Spawn);
+	m.SetTitle("Spawn (at your crosshair)");
+	m.AddItem("ammo", "Ammo and health");
+	m.AddItem("weapons", "Weapons");
+	m.AddItem("props", "Objects / furniture");
+	m.AddItem("delete", "Delete what I'm aiming at");
+	m.ExitBackButton = true;
+	m.Display(client, MENU_TIME_FOREVER);
+}
+
+int Menu_Spawn(Menu menu, MenuAction action, int client, int item)
+{
+	if (action == MenuAction_End) { delete menu; return 0; }
+	if (action == MenuAction_Cancel && item == MenuCancel_ExitBack) { ShowMainMenu(client); return 0; }
+	if (action != MenuAction_Select) return 0;
+	char info[16];
+	menu.GetItem(item, info, sizeof(info));
+	if (StrEqual(info, "ammo"))         ShowSpawnList(client, 0);
+	else if (StrEqual(info, "weapons")) ShowSpawnList(client, 1);
+	else if (StrEqual(info, "props"))   ShowSpawnList(client, 2);
+	else if (StrEqual(info, "delete"))  { DeleteAimed(client); ShowSpawnMenu(client); }
+	return 0;
+}
+
+void ShowSpawnList(int client, int page, int first = 0)
+{
+	g_spawnPage[client] = page;
+	Menu m = new Menu(Menu_SpawnList);
+	m.SetTitle(page == 0 ? "Spawn ammo / health" : (page == 1 ? "Spawn weapon" : "Spawn object"));
+	char idx[8];
+	int count = page == 0 ? sizeof(g_spawnAmmo) : (page == 1 ? sizeof(g_spawnWeapons) : sizeof(g_spawnProps));
+	for (int i = 0; i < count; i++)
+	{
+		IntToString(i, idx, sizeof(idx));
+		m.AddItem(idx, page == 0 ? g_spawnAmmo[i][1] : (page == 1 ? g_spawnWeapons[i][1] : g_spawnProps[i][1]));
+	}
+	m.ExitBackButton = true;
+	m.DisplayAt(client, first, MENU_TIME_FOREVER);   // reopen on the same page so you can spawn several
+}
+
+int Menu_SpawnList(Menu menu, MenuAction action, int client, int item)
+{
+	if (action == MenuAction_End) { delete menu; return 0; }
+	if (action == MenuAction_Cancel && item == MenuCancel_ExitBack) { ShowSpawnMenu(client); return 0; }
+	if (action != MenuAction_Select) return 0;
+	char idx[8];
+	menu.GetItem(item, idx, sizeof(idx));
+	int i = StringToInt(idx);
+	int page = g_spawnPage[client];
+	if (page == 0)      SpawnAtAim(client, g_spawnAmmo[i][0], "");
+	else if (page == 1) SpawnAtAim(client, g_spawnWeapons[i][0], "");
+	else                SpawnAtAim(client, "prop_physics_multiplayer", g_spawnProps[i][0]);
+	ShowSpawnList(client, page, menu.Selection);
+	return 0;
+}
+
+bool TraceNotSelf(int entity, int mask, int self)
+{
+	return entity != self;
+}
+
+bool AimPoint(int client, float pos[3], float normal[3], int &hitEnt)
+{
+	float eye[3], ang[3];
+	GetClientEyePosition(client, eye);
+	GetClientEyeAngles(client, ang);
+	TR_TraceRayFilter(eye, ang, MASK_SOLID, RayType_Infinite, TraceNotSelf, client);
+	if (!TR_DidHit())
+		return false;
+	TR_GetEndPosition(pos);
+	TR_GetPlaneNormal(null, normal);
+	hitEnt = TR_GetEntityIndex();
+	return GetVectorDistance(eye, pos) < 3000.0;
+}
+
+void SpawnAtAim(int client, const char[] classname, const char[] model)
+{
+	float pos[3], normal[3];
+	int hit;
+	if (!AimPoint(client, pos, normal, hit))
+	{
+		PrintToChat(client, "[ZPS] Aim at a spot closer to you");
+		return;
+	}
+	int ent = CreateEntityByName(classname);
+	if (ent == -1)
+	{
+		PrintToChat(client, "[ZPS] Can't create %s", classname);
+		return;
+	}
+	float lift = 10.0;
+	if (model[0] != '\0')
+	{
+		PrecacheModel(model, true);
+		DispatchKeyValue(ent, "model", model);
+		lift = 40.0;   // furniture: drop it from a little above the floor so it doesn't spawn stuck
+	}
+	DispatchSpawn(ent);
+	// Off the surface we aimed at, then a little up; face the player.
+	for (int k = 0; k < 3; k++)
+		pos[k] += normal[k] * 16.0;
+	pos[2] += lift;
+	float ang[3], eyeAng[3];
+	GetClientEyeAngles(client, eyeAng);
+	ang[1] = eyeAng[1] + 180.0;
+	TeleportEntity(ent, pos, ang, NULL_VECTOR);
+}
+
+void DeleteAimed(int client)
+{
+	float pos[3], normal[3];
+	int hit;
+	if (!AimPoint(client, pos, normal, hit) || hit <= MaxClients || !IsValidEntity(hit))
+	{
+		PrintToChat(client, "[ZPS] Not aiming at an object");
+		return;
+	}
+	char cls[64];
+	GetEntityClassname(hit, cls, sizeof(cls));
+	bool deletable = StrContains(cls, "prop_") == 0 || StrContains(cls, "item_") == 0
+		|| (StrContains(cls, "weapon_") == 0 && GetEntPropEnt(hit, Prop_Send, "m_hOwnerEntity") == -1);
+	if (!deletable)
+	{
+		PrintToChat(client, "[ZPS] %s can't be deleted from here", cls);
+		return;
+	}
+	AcceptEntityInput(hit, "Kill");
+	PrintToChat(client, "[ZPS] Deleted %s", cls);
 }
