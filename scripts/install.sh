@@ -71,7 +71,7 @@ cp "$REPO/gamedata/zps24_ai.games.txt"             "$SMD/gamedata/"
 cp "$REPO/configs/navbot/weapons.cfg"              "$SMD/configs/navbot/zps/weapons.cfg"
 
 echo "== 8. Plugins and configs"
-for p in zps24_compat zps24_botprobe zps24_ammorespawn zps24_survivors zps24_zombies zps24_admin navbot_quota; do
+for p in zps24_compat zps24_botprobe zps24_ammorespawn zps24_survivors zps24_zombies zps24_admin zps24_radio navbot_quota; do
 	"$SMD/scripting/spcomp" -i"$SPCOMP_INC" -i"$REPO/plugins" "$REPO/plugins/$p.sp" \
 		-o "$SMD/plugins/$p.smx" >/dev/null
 done

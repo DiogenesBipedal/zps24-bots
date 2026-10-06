@@ -266,6 +266,7 @@ void ShowMainMenu(int client)
 	m.AddItem("ai", "Toggle survivor AI");
 	m.AddItem("me", "Me: noclip / god / weapons");
 	m.AddItem("spectate", "Spectate (shows bot info)");
+	m.AddItem("radio", "Radio");
 	m.Display(client, MENU_TIME_FOREVER);
 }
 
@@ -295,6 +296,7 @@ int Menu_Main(Menu menu, MenuAction action, int client, int item)
 		ShowMainMenu(client);
 	}
 	else if (StrEqual(info, "me"))          ShowMeMenu(client);
+	else if (StrEqual(info, "radio"))       FakeClientCommand(client, "sm_radio");
 	else if (StrEqual(info, "spectate"))
 	{
 		FakeClientCommand(client, "choose3");
