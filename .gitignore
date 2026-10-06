@@ -2,3 +2,5 @@
 *.pw
 __pycache__/
 build/
+dist/
+prebuilt/

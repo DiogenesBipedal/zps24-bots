@@ -12,12 +12,24 @@ WORK="${WORK:-$HOME/zps24-dev}"
 SERVER="${1:-$HOME/zps24-server}"
 STEAMCMD="${STEAMCMD:-$HOME/.local/share/steamcmd}"
 SM_URL=https://sm.alliedmods.net/smdrop/1.12
-MM_BIN="$WORK/metamod-source/build/package/addons/metamod"
-NB_PKG="$WORK/NavBot/build/package/addons/sourcemod"
+# Patched Metamod and NavBot: the release download ships them in prebuilt/; a source checkout
+# uses what scripts/build.sh produced in $WORK.
+if [ -f "$REPO/prebuilt/metamod/bin/metamod.2.ep2.so" ]; then
+	MM_BIN="$REPO/prebuilt/metamod"
+	NB_PKG="$REPO/prebuilt/navbot"
+else
+	MM_BIN="$WORK/metamod-source/build/package/addons/metamod"
+	NB_PKG="$WORK/NavBot/build/package/addons/sourcemod"
+fi
 SPCOMP_INC="$SERVER/zps/addons/sourcemod/scripting/include"
 
 [ -f "$MM_BIN/bin/metamod.2.ep2.so" ] && [ -f "$NB_PKG/extensions/navbot.ext.2.ep2.so" ] || {
-	echo "Run scripts/build.sh first."; exit 1; }
+	echo "Patched Metamod/NavBot not found. Use the release download (it includes them),"
+	echo "or build them from source first with scripts/build.sh."; exit 1; }
+
+missing=""
+for c in curl tar python3 ip; do command -v "$c" >/dev/null || missing="$missing $c"; done
+[ -z "$missing" ] || { echo "Please install:$missing"; exit 1; }
 
 echo "== 1. ZPS 2.4 dedicated server (SteamCMD, anonymous, beta legacy2.4)"
 if [ ! -x "$STEAMCMD/steamcmd.sh" ]; then

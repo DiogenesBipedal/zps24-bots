@@ -4,7 +4,7 @@ This manual explains how the bots in this repo were made to work on ZPS 2.4, and
 techniques along the way. It is written for someone who knows a little programming and wants to
 learn how Source engine modding, reverse engineering and low-level debugging actually work.
 
-One clarification first: almost all of this is **C++**, not C. Source, Metamod, SourceMod and
+A note on languages: almost all of this is **C++**. Source, Metamod, SourceMod and
 NavBot are C++ code bases. There's also some **SourcePawn** (SourceMod's scripting language,
 which looks like C), **Python** for tools, and **shell** for automation. C++ is a superset of
 C in spirit, so everything C-like you know still applies; this manual explains the C++ parts
