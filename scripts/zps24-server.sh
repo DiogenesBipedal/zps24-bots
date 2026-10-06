@@ -1,7 +1,7 @@
 #!/bin/sh
 # ZPS 2.4 bot server (Linux dedicated server + Metamod/SourceMod/NavBot ported to Source 2007).
 #
-#   zps24-server.sh start [map]   start in the background (default map: zps_deadend)
+#   zps24-server.sh start [map]   start in the background (default map: cabin; set ZPS24_MAXPLAYERS to change the 24 slots)
 #   zps24-server.sh stop          stop it
 #   zps24-server.sh status        show players
 #   zps24-server.sh cmd "..."     run a server console command
@@ -30,11 +30,15 @@ start)
 	running && { echo "Server already running."; exit 0; }
 	mkdir -p "$CONF"
 	[ -s "$CONF/rcon.pw" ] || { umask 077; python3 -c 'import secrets;print(secrets.token_hex(16))' > "$CONF/rcon.pw"; }
-	map="${2:-zps_deadend}"
+	map="${2:-zpo_cabin_outbreak_b8_com}"
+	maxp="${ZPS24_MAXPLAYERS:-24}"   # ZPS 2.4 caps this at 24
+	# Fill every slot but one (yours) with bots.
+	sed -i "s/^sm_navbot_quota_target .*/sm_navbot_quota_target \"$((maxp - 1))\"/" \
+		"$SERVER/zps/cfg/sourcemod/plugin.navbot_quota.cfg" 2>/dev/null || true
 	cd "$SERVER"
 	# -insecure: SourceMod needs it. sv_lan 1: LAN clients only, and no Steam auth.
 	LD_LIBRARY_PATH="$SERVER/bin:$SERVER" setsid ./srcds_i486 -game zps -console -insecure \
-		+ip "$LANIP" +sv_lan 1 +maxplayers 12 +rcon_password "$(cat "$CONF/rcon.pw")" +map "$map" \
+		+ip "$LANIP" +sv_lan 1 +maxplayers "$maxp" +rcon_password "$(cat "$CONF/rcon.pw")" +map "$map" \
 		< /dev/null > "$LOG" 2>&1 &
 	printf 'Starting'
 	for i in $(seq 60); do sleep 2; printf '.'; rcon "echo ready" 2>/dev/null | grep -q ready && break; done

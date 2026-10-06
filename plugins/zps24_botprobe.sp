@@ -19,6 +19,35 @@ public void OnPluginStart()
 	g_interval = CreateConVar("sm_botprobe_interval", "0", "Seconds between bot state logs (0 = off)");
 	g_interval.AddChangeHook(OnIntervalChanged);
 	RegServerCmd("sm_botprobe", Cmd_Probe, "Log every bot's state once");
+
+	// Log chat/text user messages sent to clients (to debug odd chat text).
+	static const char msgs[][] = { "SayText", "SayText2", "TextMsg", "HintText", "KeyHintText" };
+	for (int i = 0; i < sizeof(msgs); i++)
+	{
+		UserMsg id = GetUserMessageId(msgs[i]);
+		if (id != INVALID_MESSAGE_ID)
+			HookUserMessage(id, Msg_Log, false);
+	}
+}
+
+Action Msg_Log(UserMsg msg_id, BfRead msg, const int[] players, int playersNum, bool reliable, bool init)
+{
+	char name[32], buf[256], text[512];
+	GetUserMessageName(msg_id, name, sizeof(name));
+	text[0] = '\0';
+	// Dump the first few fields as strings/bytes; enough to see what the client is asked to print.
+	int first = msg.ReadByte();
+	Format(text, sizeof(text), "b0=%d", first);
+	for (int i = 0; i < 4 && msg.BytesLeft > 0; i++)
+	{
+		msg.ReadString(buf, sizeof(buf), true);
+		Format(text, sizeof(text), "%s | \"%s\"", text, buf);
+	}
+	char who[64] = "-";
+	if (playersNum > 0 && IsClientInGame(players[0]))
+		Format(who, sizeof(who), "%N%s", players[0], IsFakeClient(players[0]) ? " (bot)" : "");
+	PrintToServer("[usermsg] %s to %d players (first: %s): %s", name, playersNum, who, text);
+	return Plugin_Continue;
 }
 
 void OnIntervalChanged(ConVar cv, const char[] oldv, const char[] newv)

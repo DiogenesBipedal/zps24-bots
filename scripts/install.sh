@@ -69,11 +69,13 @@ mkdir -p "$SMD/gamedata/core.games/custom"
 cp "$REPO/gamedata/core.games-custom-zps24.txt"    "$SMD/gamedata/core.games/custom/zps24.txt"
 
 echo "== 8. Plugins and configs"
-for p in zps24_compat zps24_botprobe navbot_quota; do
+for p in zps24_compat zps24_botprobe zps24_ammorespawn navbot_quota; do
 	"$SMD/scripting/spcomp" -i"$SPCOMP_INC" -i"$REPO/plugins" "$REPO/plugins/$p.sp" \
 		-o "$SMD/plugins/$p.smx" >/dev/null
 done
 mkdir -p "$SERVER/zps/cfg/sourcemod"
 cp -n "$REPO/configs/plugin.navbot_quota.cfg" "$SERVER/zps/cfg/sourcemod/" 2>/dev/null || true
+cp -n "$REPO/configs/server.cfg" "$SERVER/zps/cfg/" 2>/dev/null || true
+cp -n "$REPO/configs/mapcycle_bots.txt" "$SERVER/zps/" 2>/dev/null || true
 
 echo "Installed into $SERVER. Start it with scripts/zps24-server.sh start"

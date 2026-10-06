@@ -32,8 +32,10 @@ to your LAN address; `sv_lan 1` keeps internet players out.)
 | `zps24-server.sh navgen` | Generate and save the nav mesh for the current map |
 | `zps24-server.sh log` | Follow the server console |
 
-To change the bot count, edit `sm_navbot_quota_target` in `zps/cfg/sourcemod/plugin.navbot_quota.cfg`
-(the default is 11 bots on a 12-slot server).
+The server has 24 slots (the most ZPS 2.4 allows), and `start` fills 23 with bots, leaving one for you.
+Set `ZPS24_MAXPLAYERS` for fewer slots. `configs/server.cfg` alternates `mapcycle_bots.txt`
+(cabin and church) every 2 rounds (`mp_maxrounds`), and `zps24_ammorespawn` brings ammo back
+30 seconds after pickup on maps matching `sm_ammorespawn_maps` (default `cabin,church`).
 
 ## What had to be fixed
 
@@ -56,7 +58,7 @@ To change the bot count, edit `sm_navbot_quota_target` in `zps/cfg/sourcemod/plu
 ```
 patches/    Metamod:Source and NavBot changes, against the pinned commits in build.sh
 gamedata/   SourceMod/NavBot gamedata for the 2.4 server_i486.so
-plugins/    zps24_compat (event listeners), zps24_botprobe (headless bot logging), navbot_quota
+plugins/    zps24_compat (event listeners), zps24_botprobe (headless bot logging), zps24_ammorespawn, navbot_quota
 tools/      vtable.py (dump vtables), port_gamedata.py (3.x -> 2.4 offsets), clear_execstack.py
 scripts/    build.sh, install.sh, zps24-server.sh, rcon.py, zps-switch.sh (swap the client between 3.x and 2.4)
 configs/    default bot quota
