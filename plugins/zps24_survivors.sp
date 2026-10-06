@@ -84,6 +84,8 @@ int    g_armTries[MAXPLAYERS + 1];       // failed gun handovers (weight limit) 
 float  g_armPauseUntil[MAXPLAYERS + 1];
 int    g_defendIdx[MAXPLAYERS + 1];      // which defend spot the bot holds
 float  g_defendSwitch[MAXPLAYERS + 1];   // when to move to another spot
+int    g_hurtBy[MAXPLAYERS + 1];         // zombie that last hit this bot (client index)
+float  g_hurtUntil[MAXPLAYERS + 1];      // react to that hit until then
 float  g_lookAround[MAXPLAYERS + 1];     // next time to turn and watch another door/window       // gun spawned in front of the bot, waiting to be picked up
 
 static const char g_guns[][] = { "weapon_glock", "weapon_glock18c", "weapon_usp", "weapon_ppk", "weapon_revolver",
@@ -118,6 +120,7 @@ public void OnPluginStart()
 
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
 	HookEventEx("player_death", Event_PlayerDeath, EventHookMode_Post);
+	HookEventEx("player_hurt", Event_PlayerHurt, EventHookMode_Post);
 	RegServerCmd("sm_zps24ai_status", Cmd_Status, "Show the hold-out and barricade progress");
 	ResetRound();
 }
@@ -138,6 +141,27 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 	int victim = GetClientOfUserId(event.GetInt("userid"));
 	if (victim > 0 && IsClientInGame(victim) && GetClientTeam(victim) == TEAM_SURVIVORS)
 		g_survivorDeaths++;
+}
+
+// A zombie hit a survivor bot: for the next 3 s it turns on that zombie, backs off to a safe
+// distance and keeps shooting, even if the zombie came from behind.
+void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
+{
+	int victim = GetClientOfUserId(event.GetInt("userid"));
+	if (victim < 1 || !IsClientInGame(victim) || !IsFakeClient(victim) || GetClientTeam(victim) != TEAM_SURVIVORS)
+		return;
+	int attacker = GetClientOfUserId(event.GetInt("attacker"));
+	if (attacker < 1 || !IsClientInGame(attacker) || GetClientTeam(attacker) != TEAM_ZOMBIES)
+	{
+		// No attacker reported: blame the nearest zombie within claw reach.
+		float d;
+		attacker = NearestZombie(victim, 140.0, d);
+		if (!attacker)
+			return;
+	}
+	g_hurtBy[victim] = attacker;
+	g_hurtUntil[victim] = GetGameTime() + 3.0;
+	Debug("%N hit by %N (%d hp left): backing off", victim, attacker, event.GetInt("health"));
 }
 
 // Overrun: 3+ survivors died at this hold-out within two minutes and zombies are inside it.
@@ -1130,6 +1154,48 @@ bool SelfDefence(int client, NavBot bot, int &zombie, float &zdist)
 // ---------------------------------------------------------------------------------------------
 // Main loop
 
+// A walkable spot about 220 units away from a zombie: straight away if that's open, else the
+// direction (up to 90 degrees off) that ends farthest from it. Avoids backing into walls.
+bool RetreatSpot(int client, const float them[3], float out[3])
+{
+	float me[3], away[3], ang[3];
+	GetClientAbsOrigin(client, me);
+	SubtractVectors(me, them, away);
+	away[2] = 0.0;
+	NormalizeVector(away, away);
+	GetVectorAngles(away, ang);
+	static const float offsets[] = { 0.0, 35.0, -35.0, 70.0, -70.0, 90.0, -90.0 };
+	float best = -1.0;
+	for (int i = 0; i < sizeof(offsets); i++)
+	{
+		float a[3], dir[3], end[3], spot[3];
+		a = ang;
+		a[1] += offsets[i];
+		GetAngleVectors(a, dir, NULL_VECTOR, NULL_VECTOR);
+		// How far we can actually walk that way before hitting a wall.
+		float from[3];
+		from = me;
+		from[2] += 24.0;
+		ScaleVector(dir, 220.0);
+		AddVectors(from, dir, end);
+		TR_TraceHullFilter(from, end, view_as<float>({-16.0, -16.0, 0.0}), view_as<float>({16.0, 16.0, 40.0}), MASK_PLAYERSOLID, TraceIgnoreSelf, client);
+		TR_GetEndPosition(end);
+		if (GetVectorDistance(from, end) < 60.0)
+			continue;
+		Address area = NavBotNavMesh.GetNearestNavArea(end, 80.0, false, true);
+		if (area == Address_Null)
+			continue;
+		NavBotNavArea.GetClosestPointOnArea(area, end, spot);
+		float d = GetVectorDistance(spot, them);
+		if (d > best + 40.0)        // prefer the straighter direction unless another is clearly better
+		{
+			best = d;
+			out = spot;
+		}
+	}
+	return best > 0.0;
+}
+
 Action MoveTo(int client, float moveGoal[3])
 {
 	float me[3];
@@ -1171,21 +1237,48 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	float me[3];
 	GetClientAbsOrigin(client, me);
 
-	// Keep a safe distance from zombies while holding a gun.
-	// Fight first: aim at and shoot the nearest zombie in sight. Only move if it's right on top of us.
+	// Fight first: aim at and shoot the nearest zombie in sight, standing our ground while it's
+	// farther than the safe distance. Closer than that, or after being hit, back off and keep shooting.
 	float zdist;
 	int zombie;
 	bool fighting = SelfDefence(client, bot, zombie, zdist);
-	if (fighting && zdist > g_safeDist.FloatValue)
-		return Hold(client);                // stand our ground and shoot; back off once they get close
 	if (!fighting)
 		zombie = 0;
-	if (zombie && IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
+
+	// Just got hit: that zombie is the threat, wherever it is (behind us, beside a door, ...).
+	bool hurt = false;
+	int attacker = g_hurtBy[client];
+	if (GetGameTime() < g_hurtUntil[client] && attacker > 0 && IsClientInGame(attacker) && IsPlayerAlive(attacker) && GetClientTeam(attacker) == TEAM_ZOMBIES)
+	{
+		float them[3];
+		GetClientAbsOrigin(attacker, them);
+		float d = GetVectorDistance(me, them);
+		if (d < g_safeDist.FloatValue)
+		{
+			hurt = true;
+			zombie = attacker;
+			zdist = d;
+			Address ctrl = bot.GetPlayerControllerInterface();
+			NavBotPlayerControllerInterface.AimAtEntity(ctrl, attacker, LOOK_CRITICAL, 0.4, "Hit by a zombie");
+			int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+			if (IsGun(weapon) && GetEntProp(weapon, Prop_Send, "m_iClip1") <= 0)
+				NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_RELOAD, 0.2);
+			else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+				NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.1);
+		}
+		else
+			g_hurtUntil[client] = 0.0;      // already at a safe distance
+	}
+
+	if (fighting && !hurt && zdist > g_safeDist.FloatValue)
+		return Hold(client);                // stand our ground and shoot
+
+	if (zombie && (hurt || IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon"))))
 	{
 		float them[3];
 		GetClientAbsOrigin(zombie, them);
 		// Fall back inside the hold-out: the defend spot farthest from the zombie, if it's a real
-		// step back; otherwise just step straight away.
+		// step back; otherwise the best open direction away from it.
 		int best = -1;
 		float bestScore = GetVectorDistance(me, them) + 150.0;
 		int candidates = g_upperCount > 0 ? g_upperCount : g_defendCount;   // never fall back downstairs
@@ -1200,7 +1293,7 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 			g_defendIdx[client] = best;
 			g_defendSwitch[client] = GetGameTime() + 20.0;
 		}
-		else
+		else if (!RetreatSpot(client, them, moveGoal))
 		{
 			float away[3];
 			SubtractVectors(me, them, away);
