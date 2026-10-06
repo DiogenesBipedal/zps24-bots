@@ -23,8 +23,10 @@ public Plugin myinfo =
 #define OFFSET_ZOMBIE_VOLUNTEER 0x1369
 #define TEAM_SURVIVOR_BOT 2
 #define TEAM_ZOMBIE_BOT   3
+#define TEAM_READYROOM    4   // between rounds; still being here at round start = auto-assigned zombie
 
-ConVar g_humansSurvive, g_hookSpeed, g_autoBind;
+ConVar g_humansSurvive, g_hookSpeed, g_autoBind, g_volunteerValue;
+bool   g_joinWindow;   // between ZPS's "Round is starting" and "Round has started" messages
 int    g_beamSprite, g_haloSprite;
 bool   g_hooking[MAXPLAYERS + 1];
 float  g_hookPoint[MAXPLAYERS + 1][3];
@@ -37,14 +39,21 @@ public void OnPluginStart()
 	g_humansSurvive = CreateConVar("sm_zps24_humans_survive", "1", "Keep human players off the zombie team at round start");
 	g_hookSpeed     = CreateConVar("sm_zps24_hook_speed", "900", "Grappling hook pull speed");
 	g_autoBind      = CreateConVar("sm_zps24_autobind", "1", "Bind M (menu) and V (hook) for admins when they join");
+	g_volunteerValue = CreateConVar("sm_zps24_volunteer_value", "-1", "Experimental: value of ChooseRandomZombie's per-player byte for bots (humans get the opposite); -1 = leave alone");
 	AutoExecConfig(true, "zps24_admin");
 
 	RegAdminCmd("sm_zpsmenu", Cmd_Menu, ADMFLAG_GENERIC, "Open the ZPS 2.4 admin menu");
 	RegAdminCmd("+zpshook", Cmd_HookOn, ADMFLAG_GENERIC, "Grappling hook (hold)");
 	RegAdminCmd("-zpshook", Cmd_HookOff, ADMFLAG_GENERIC, "Grappling hook release");
 
+	RegServerCmd("sm_zps24_humans", Cmd_Humans, "Print human players' teams and the Carrier");
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
 	CreateTimer(1.0, Timer_MarkVolunteers, _, TIMER_REPEAT);
+
+	// ZPS announces the join window with TextMsg; track it so humans only ever join inside it.
+	UserMsg textmsg = GetUserMessageId("TextMsg");
+	if (textmsg != INVALID_MESSAGE_ID)
+		HookUserMessage(textmsg, Msg_TextMsg, false);
 }
 
 public void OnMapStart()
@@ -73,11 +82,41 @@ public void OnClientDisconnect(int client)
 
 void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 {
+	// A new round's join window: everyone is back in the ready room. Pick Survivors for humans now;
+	// doing it once the round is running counts as a late join and makes them zombies.
+	CreateTimer(1.0, Timer_JoinSurvivors, _, TIMER_FLAG_NO_MAPCHANGE);
+	CreateTimer(4.0, Timer_JoinSurvivors, _, TIMER_FLAG_NO_MAPCHANGE);
 	MarkVolunteers();
+}
+
+Action Timer_JoinSurvivors(Handle timer)
+{
+	if (!g_humansSurvive.BoolValue)
+		return Plugin_Stop;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == TEAM_READYROOM)
+			FakeClientCommand(i, "choose1");
+	}
+	return Plugin_Stop;
+}
+
+Action Msg_TextMsg(UserMsg msg_id, BfRead msg, const int[] players, int playersNum, bool reliable, bool init)
+{
+	char text[192];
+	msg.ReadByte();
+	msg.ReadString(text, sizeof(text), true);
+	if (StrContains(text, "Round is starting") != -1)
+		g_joinWindow = true;
+	else if (StrContains(text, "Round has started") != -1)
+		g_joinWindow = false;
+	return Plugin_Continue;
 }
 
 Action Timer_MarkVolunteers(Handle timer)
 {
+	if (g_joinWindow)
+		Timer_JoinSurvivors(null);
 	MarkVolunteers();
 	return Plugin_Continue;
 }
@@ -86,11 +125,33 @@ void MarkVolunteers()
 {
 	if (!g_humansSurvive.BoolValue)
 		return;
+
+	if (g_volunteerValue.IntValue < 0)
+		return;
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (IsClientInGame(i))
-			SetEntData(i, OFFSET_ZOMBIE_VOLUNTEER, IsFakeClient(i) ? 1 : 0, 1, false);
+		{
+			int bots = g_volunteerValue.IntValue ? 1 : 0;
+			SetEntData(i, OFFSET_ZOMBIE_VOLUNTEER, IsFakeClient(i) ? bots : 1 - bots, 1, false);
+		}
 	}
+}
+
+Action Cmd_Humans(int args)
+{
+	char weapon[64];
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i))
+			continue;
+		weapon = "-";
+		if (IsPlayerAlive(i))
+			GetClientWeapon(i, weapon, sizeof(weapon));
+		if (!IsFakeClient(i) || StrEqual(weapon, "weapon_carrierarms"))
+			PrintToServer("[humans] %N bot=%d team=%d alive=%d weapon=%s", i, IsFakeClient(i), GetClientTeam(i), IsPlayerAlive(i), weapon);
+	}
+	return Plugin_Handled;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -176,7 +237,7 @@ void ShowMainMenu(int client)
 	m.AddItem("addsurvivor", "Add survivor bot");
 	m.AddItem("bots", "Bot count / skill / kick");
 	m.AddItem("map", "Change map");
-	m.AddItem("restart", "Restart round");
+	m.AddItem("restart", "Restart map (new round)");
 	m.AddItem("ai", "Toggle survivor AI");
 	m.AddItem("me", "Me: noclip / god / weapons");
 	m.Display(client, MENU_TIME_FOREVER);
@@ -193,7 +254,14 @@ int Menu_Main(Menu menu, MenuAction action, int client, int item)
 	else if (StrEqual(info, "addsurvivor")) { AddBot(TEAM_SURVIVOR_BOT); ShowMainMenu(client); }
 	else if (StrEqual(info, "bots"))        ShowBotMenu(client);
 	else if (StrEqual(info, "map"))         ShowMapMenu(client);
-	else if (StrEqual(info, "restart"))     { ServerCommand("mp_restartround 3"); PrintToChatAll("[ZPS] Round restarting"); }
+	else if (StrEqual(info, "restart"))
+	{
+		// mp_restartround does nothing in ZPS 2.4; reloading the map starts a fresh round.
+		char map[64];
+		GetCurrentMap(map, sizeof(map));
+		PrintToChatAll("[ZPS] Restarting %s", map);
+		ForceChangeLevel(map, "Admin restart");
+	}
 	else if (StrEqual(info, "ai"))
 	{
 		ConVar ai = FindConVar("sm_zps24ai_enable");

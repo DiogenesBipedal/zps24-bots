@@ -62,6 +62,7 @@ float  g_carryStarted[MAXPLAYERS + 1];
 float  g_nextUse[MAXPLAYERS + 1];
 float  g_restockUntil[MAXPLAYERS + 1];
 bool   g_scripted[MAXPLAYERS + 1];
+float  g_lastPos[MAXPLAYERS + 1][3];
 
 static const char g_guns[][] = { "weapon_glock", "weapon_glock18c", "weapon_usp", "weapon_ppk", "weapon_revolver",
 	"weapon_870", "weapon_supershorty", "weapon_winchester", "weapon_ak47", "weapon_m4", "weapon_mp5" };
@@ -749,8 +750,47 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	return Plugin_Continue;
 }
 
+// Bots that haven't moved for a second next to a closed door get it opened, exactly what E does.
+// (Bots look at enemies and watch spots while walking, so a "press E on what I'm looking at" check
+// misses doors right next to them.) Only doors with the "Use opens" flag; button doors stay shut.
+void UnstickFromDoors()
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || !IsFakeClient(client) || !IsPlayerAlive(client) || GetClientTeam(client) != TEAM_SURVIVORS)
+			continue;
+		float pos[3];
+		GetClientAbsOrigin(client, pos);
+		float moved = GetVectorDistance(pos, g_lastPos[client]);
+		g_lastPos[client] = pos;
+		if (moved > 20.0 || GetGameTime() < g_nextUse[client])
+			continue;
+
+		int door = -1, best = -1;
+		float bestDist = 96.0;
+		while ((door = FindEntityByClassname(door, "func_door_rotating")) != -1)
+		{
+			if ((GetEntProp(door, Prop_Data, "m_spawnflags") & 256) == 0 || GetEntProp(door, Prop_Data, "m_toggle_state") != 1)
+				continue;   // not use-able, or not closed (1 = TS_AT_BOTTOM)
+			float center[3];
+			EntityCenter(door, center);
+			float d = GetVectorDistance(pos, center);
+			if (d < bestDist) { bestDist = d; best = door; }
+		}
+		if (best != -1)
+		{
+			AcceptEntityInput(best, "Open", client, client);   // rotating doors swing away from the activator
+			g_nextUse[client] = GetGameTime() + 2.0;
+			Debug("%N unstuck: opened door %d", client, best);
+		}
+	}
+}
+
 Action Timer_Think(Handle timer)
 {
+	if (g_enable.BoolValue)
+		UnstickFromDoors();
+
 	if (!g_enable.BoolValue || !LibraryExists("navbot") || !NavBotNavMesh.IsLoaded())
 		return Plugin_Continue;
 	if (GetGameTime() - g_roundStart < g_equipTime.FloatValue)

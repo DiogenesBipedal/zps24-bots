@@ -58,7 +58,8 @@ Set `ZPS24_MAXPLAYERS` for fewer slots. `configs/server.cfg` alternates `mapcycl
 ```
 patches/    Metamod:Source and NavBot changes, against the pinned commits in build.sh
 gamedata/   SourceMod/NavBot gamedata for the 2.4 server_i486.so
-plugins/    zps24_compat (event listeners), zps24_botprobe (headless bot logging), zps24_ammorespawn, navbot_quota
+plugins/    zps24_survivors (hold out, barricade, kite, doors), zps24_zombies (hunt survivors, smash barricades),
+            zps24_admin (M menu, V hook, humans join survivors), zps24_ammorespawn, zps24_compat, zps24_botprobe, navbot_quota
 tools/      vtable.py (dump vtables), port_gamedata.py (3.x -> 2.4 offsets), clear_execstack.py
 scripts/    build.sh, install.sh, zps24-server.sh, rcon.py, zps-switch.sh (swap the client between 3.x and 2.4)
 configs/    default bot quota
