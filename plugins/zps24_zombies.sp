@@ -33,6 +33,12 @@ float  g_smashUntil[MAXPLAYERS + 1];
 int    g_smashHealth[MAXPLAYERS + 1];    // obstacle health when we started hitting it
 int    g_ignore[MAXPLAYERS + 1][4];      // obstacles that didn't break when hit (entity refs)
 float  g_ignoreUntil[MAXPLAYERS + 1][4];
+float  g_goal[MAXPLAYERS + 1][3];        // where we're heading to reach g_target
+float  g_goalTarget[MAXPLAYERS + 1][3];  // the target's position when g_goal was chosen
+float  g_goalTime[MAXPLAYERS + 1];
+float  g_blockedSince[MAXPLAYERS + 1];   // at the goal, but the target is behind a wall
+Address g_deadEnd[MAXPLAYERS + 1][4];    // goal areas that turned out to be dead ends
+float  g_deadEndUntil[MAXPLAYERS + 1][4];
 
 public void OnPluginStart()
 {
@@ -48,6 +54,10 @@ public void OnMapStart()
 	{
 		g_scripted[i] = false;
 		g_smash[i] = INVALID_ENT_REFERENCE;
+		g_goalTime[i] = 0.0;
+		g_blockedSince[i] = 0.0;
+		for (int k = 0; k < 4; k++)
+			g_deadEndUntil[i][k] = 0.0;
 		Unstick_Reset(i);
 	}
 	CreateTimer(0.5, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
@@ -96,6 +106,90 @@ int PickTarget(int zombie)
 				int ti = ids[a]; ids[a] = ids[b]; ids[b] = ti;
 			}
 	return ids[GetRandomInt(0, k - 1)];
+}
+
+// Walls only: players and props don't block the view for this purpose.
+bool CanSee(int a, int b)
+{
+	float from[3], to[3];
+	GetClientEyePosition(a, from);
+	GetClientEyePosition(b, to);
+	TR_TraceRay(from, to, MASK_SOLID_BRUSHONLY, RayType_EndPoint);
+	return !TR_DidHit();
+}
+
+bool IsDeadEnd(int client, Address area)
+{
+	for (int k = 0; k < 4; k++)
+		if (g_deadEnd[client][k] == area && GetGameTime() < g_deadEndUntil[client][k])
+			return true;
+	return false;
+}
+
+void MarkDeadEnd(int client, Address area)
+{
+	int slot = 0;
+	for (int k = 1; k < 4; k++)
+		if (g_deadEndUntil[client][k] < g_deadEndUntil[client][slot])
+			slot = k;
+	g_deadEnd[client][slot] = area;
+	g_deadEndUntil[client][slot] = GetGameTime() + 20.0;
+}
+
+// Where to walk to reach a survivor. Aim at the survivor's own floor: the raw position snaps to
+// whatever nav area is nearest, which for someone upstairs is often the floor below, and for
+// someone hiding where the mesh doesn't reach (a closet, on furniture, a nook) is often the room
+// on the other side of a wall. Only spots the survivor can be seen from count; failing that,
+// the last area the survivor stood on, which is the way they came in.
+void ComputeGoal(int client, int target, float goal[3])
+{
+	float pos[3], eye[3], probe[3], spot[3];
+	GetClientAbsOrigin(target, pos);
+	GetClientEyePosition(target, eye);
+	probe = pos;
+	probe[2] += 16.0;
+
+	Address area = NavBotNavMesh.GetNearestNavArea(probe, 150.0, true, true);
+	if (area != Address_Null && !IsDeadEnd(client, area))
+	{
+		NavBotNavArea.GetClosestPointOnArea(area, pos, goal);
+		return;
+	}
+
+	float mins[3], maxs[3];
+	mins[0] = pos[0] - 320.0; mins[1] = pos[1] - 320.0; mins[2] = pos[2] - 100.0;
+	maxs[0] = pos[0] + 320.0; maxs[1] = pos[1] + 320.0; maxs[2] = pos[2] + 100.0;
+	NavBotNavAreaVector areas = NavBotNavMesh.CollectAreasOverlappingExtent(mins, maxs);
+	Address best = Address_Null;
+	float bestDist = 1.0e9;
+	for (int i = 0; i < areas.Size; i++)
+	{
+		Address a = areas.At(i);
+		if (IsDeadEnd(client, a))
+			continue;
+		NavBotNavArea.GetClosestPointOnArea(a, pos, spot);
+		float d = GetVectorDistance(spot, pos);
+		if (d >= bestDist || !NavBotNavArea.IsVisible(a, eye))
+			continue;
+		best = a;
+		bestDist = d;
+		goal = spot;
+	}
+	delete areas;
+	if (best != Address_Null)
+		return;
+
+	NavBotBasePlayer player = NavBotManager.GetBasePlayer(target);
+	if (!player.IsNull)
+	{
+		Address last = player.GetLastKnownNavArea();
+		if (last != Address_Null && !IsDeadEnd(client, last))
+		{
+			NavBotNavArea.GetClosestPointOnArea(last, pos, goal);
+			return;
+		}
+	}
+	goal = pos;
 }
 
 // Can this entity actually be broken? Big metal furniture is often a prop_physics with no
@@ -253,22 +347,51 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		return Plugin_Continue;     // no survivors left to hunt
 	}
 
-	// Aim the path at the survivor's own floor. The raw position snaps to whatever nav area is
-	// nearest, which for someone upstairs is often the floor right below them, so zombies would
-	// crowd underneath instead of taking the stairs or ladder. Prefer an area the survivor can see.
-	float target[3];
-	GetClientAbsOrigin(g_target[client], target);
-	float probe[3];
-	probe = target;
-	probe[2] += 16.0;
-	Address area = NavBotNavMesh.GetNearestNavArea(probe, 150.0, true, true);
-	if (area != Address_Null)
-		NavBotNavArea.GetClosestPointOnArea(area, target, moveGoal);
-	else
-		moveGoal = target;
-	routeType = NAVBOT_FASTEST_ROUTE;
-	float me[3];
+	float me[3], target[3];
 	GetClientAbsOrigin(client, me);
+	GetClientAbsOrigin(g_target[client], target);
+	bool sees = CanSee(client, g_target[client]);
+
+	// Close and in plain view: go straight for them.
+	if (sees && GetVectorDistance(me, target) < 200.0)
+	{
+		moveGoal = target;
+		g_blockedSince[client] = 0.0;
+		routeType = NAVBOT_FASTEST_ROUTE;
+		Unstick_WantMove(client, me, moveGoal);
+		return Plugin_Changed;
+	}
+
+	if (GetGameTime() > g_goalTime[client] + 1.0 || GetVectorDistance(target, g_goalTarget[client]) > 64.0)
+	{
+		ComputeGoal(client, g_target[client], g_goal[client]);
+		g_goalTarget[client] = target;
+		g_goalTime[client] = GetGameTime();
+	}
+
+	// Arrived, yet the survivor is still behind a wall: that spot is a dead end. Remember it and
+	// pick another, instead of standing in the corner for the rest of the round.
+	if (!sees && GetVectorDistance(me, g_goal[client]) < 70.0 && GetVectorDistance(me, target) > 80.0)
+	{
+		if (g_blockedSince[client] == 0.0)
+			g_blockedSince[client] = GetGameTime();
+		else if (GetGameTime() - g_blockedSince[client] > 2.0)
+		{
+			Address dead = NavBotNavMesh.GetNearestNavArea(g_goal[client], 64.0, false, true);
+			if (dead != Address_Null)
+				MarkDeadEnd(client, dead);
+			Debug("%N: dead end near %N, picking another spot", client, g_target[client]);
+			ComputeGoal(client, g_target[client], g_goal[client]);
+			g_goalTarget[client] = target;
+			g_goalTime[client] = GetGameTime();
+			g_blockedSince[client] = 0.0;
+		}
+	}
+	else
+		g_blockedSince[client] = 0.0;
+
+	moveGoal = g_goal[client];
+	routeType = NAVBOT_FASTEST_ROUTE;
 	Unstick_WantMove(client, me, moveGoal);
 	return Plugin_Changed;
 }
