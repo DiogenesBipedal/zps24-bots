@@ -9,6 +9,7 @@
 #include <sourcemod>
 #include <sdktools>
 #include <navbot>
+#include "include/zps24_unstick.inc"
 
 public Plugin myinfo =
 {
@@ -43,6 +44,7 @@ public void OnMapStart()
 	{
 		g_scripted[i] = false;
 		g_smash[i] = INVALID_ENT_REFERENCE;
+		Unstick_Reset(i);
 	}
 	CreateTimer(0.5, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -164,13 +166,19 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 	g_smash[client] = INVALID_ENT_REFERENCE;
 
+	if (Unstick_Goal(client, moveGoal))
+		return Plugin_Changed;              // detour around whatever we're stuck on
+
 	if (!IsLiveSurvivor(g_target[client]) || GetGameTime() > g_retarget[client])
 	{
 		g_target[client] = PickTarget(client);
 		g_retarget[client] = GetGameTime() + GetRandomFloat(8.0, 14.0);
 	}
 	if (!g_target[client])
+	{
+		g_us_wantMove[client] = false;
 		return Plugin_Continue;     // no survivors left to hunt
+	}
 
 	// Aim the path at the survivor's own floor. The raw position snaps to whatever nav area is
 	// nearest, which for someone upstairs is often the floor right below them, so zombies would
@@ -186,6 +194,9 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	else
 		moveGoal = target;
 	routeType = NAVBOT_FASTEST_ROUTE;
+	float me[3];
+	GetClientAbsOrigin(client, me);
+	Unstick_WantMove(client, me, moveGoal);
 	return Plugin_Changed;
 }
 
@@ -202,6 +213,7 @@ Action Timer_Think(Handle timer)
 			continue;
 		}
 		NavBot bot = NavBotManager.GetNavBotByIndex(client);
+		Unstick_Track(client, bot);
 
 		// Stuck detection: barely moved for 1.5 s while not already smashing something.
 		float pos[3];
@@ -224,9 +236,28 @@ Action Timer_Think(Handle timer)
 
 		if (!g_scripted[client] || !NavBotBehaviorInterface.IsRunningPluginCommand(bot.GetBehaviorInterface()))
 		{
+			// A scripted task left over from a previous load of this plugin would keep calling a
+			// dead callback and leave the bot idle. Stop whatever is running, then start ours.
+			if (NavBotBehaviorInterface.IsRunningPluginCommand(bot.GetBehaviorInterface()))
+			{
+				bot.SendPluginCommand(NAVBOT_PLUGINCMD_STOPCMD);
+				continue;   // start ours on the next tick
+			}
 			bot.SendScriptedPluginCommand(OnScriptedUpdate);
 			g_scripted[client] = true;
 		}
 	}
 	return Plugin_Continue;
+}
+
+// Don't leave bots running a scripted task whose callback is about to disappear.
+public void OnPluginEnd()
+{
+	if (!LibraryExists("navbot"))
+		return;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (IsClientInGame(client) && NavBotManager.IsNavBot(client) && g_scripted[client])
+			NavBotManager.GetNavBotByIndex(client).SendPluginCommand(NAVBOT_PLUGINCMD_STOPCMD);
+	}
 }

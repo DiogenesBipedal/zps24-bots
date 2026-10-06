@@ -18,6 +18,7 @@
 #include <sourcemod>
 #include <sdktools>
 #include <navbot>
+#include "include/zps24_unstick.inc"
 
 public Plugin myinfo =
 {
@@ -32,7 +33,7 @@ public Plugin myinfo =
 #define AMMO_BARRICADE 7          // ammo index of barricade boards (see GetAmmoDef in the manual)
 #define MAX_OPENINGS   64
 
-ConVar g_giveWeapons, g_infiniteAmmo;
+ConVar g_giveWeapons, g_infiniteAmmo, g_needTool;
 ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOpening, g_debug, g_upperHeight, g_furniture;
 
 Handle g_canAttach;               // SDKCall: bool CWeapon_Barricade::CanAttachBarricade()
@@ -42,10 +43,15 @@ bool  g_haveHoldout;
 float g_holdout[3];
 int   g_openingCount;
 float g_openingPos[MAX_OPENINGS][3];
+float g_openingInside[MAX_OPENINGS][3];  // unit vector pointing from the opening into the building
 int   g_openingBoards[MAX_OPENINGS];     // boards successfully placed
 int   g_openingClaim[MAX_OPENINGS];      // client working on it (0 = nobody)
 bool  g_openingDone[MAX_OPENINGS];
 float g_roundStart;
+int   g_survivorDeaths;                  // survivor bot deaths since the hold-out was chosen
+float g_holdoutChosenAt;
+float g_badHoldout[8][3];                // hold-outs we were overrun at this round
+int   g_badHoldoutCount;
 
 // Defend spots inside the hold-out: upper floors / roofs / balconies first, then corners.
 #define MAX_DEFEND 32
@@ -58,13 +64,25 @@ BotJob g_job[MAXPLAYERS + 1];
 int    g_jobOpening[MAXPLAYERS + 1];
 float  g_jobStarted[MAXPLAYERS + 1];
 int    g_aimTry[MAXPLAYERS + 1];
+float  g_hammerUntil[MAXPLAYERS + 1];
+float  g_hammerStart[MAXPLAYERS + 1];
+int    g_hammerMode[MAXPLAYERS + 1];
+int    g_modeNext;                       // round-robin over hammer input patterns until one works
+int    g_modeWorks = 0;                  // hold attack through the animation: verified to place boards    // holding attack on a locked aim point until this time
+float  g_hammerAim[MAXPLAYERS + 1][3];
+int    g_hammerBoardsBefore[MAXPLAYERS + 1];
 int    g_carryProp[MAXPLAYERS + 1];      // furniture being carried (entity reference) or INVALID_ENT_REFERENCE
 float  g_carryStarted[MAXPLAYERS + 1];
 float  g_nextUse[MAXPLAYERS + 1];
 float  g_restockUntil[MAXPLAYERS + 1];
 bool   g_scripted[MAXPLAYERS + 1];
 float  g_lastPos[MAXPLAYERS + 1][3];
-int    g_givenGun[MAXPLAYERS + 1];       // gun spawned in front of the bot, waiting to be picked up
+int    g_givenGun[MAXPLAYERS + 1];
+int    g_armTries[MAXPLAYERS + 1];       // failed gun handovers (weight limit) since the last success
+float  g_armPauseUntil[MAXPLAYERS + 1];
+int    g_defendIdx[MAXPLAYERS + 1];      // which defend spot the bot holds
+float  g_defendSwitch[MAXPLAYERS + 1];   // when to move to another spot
+float  g_lookAround[MAXPLAYERS + 1];     // next time to turn and watch another door/window       // gun spawned in front of the bot, waiting to be picked up
 
 static const char g_guns[][] = { "weapon_glock", "weapon_glock18c", "weapon_usp", "weapon_ppk", "weapon_revolver",
 	"weapon_870", "weapon_supershorty", "weapon_winchester", "weapon_ak47", "weapon_m4", "weapon_mp5" };
@@ -75,9 +93,10 @@ public void OnPluginStart()
 	g_equipTime        = CreateConVar("sm_zps24ai_equip_time", "0", "Seconds at round start bots spend collecting weapons/ammo before holding out (not needed with sm_zps24ai_give_weapons)");
 	g_giveWeapons      = CreateConVar("sm_zps24ai_give_weapons", "1", "Give every survivor bot a random gun");
 	g_infiniteAmmo     = CreateConVar("sm_zps24ai_infinite_ammo", "1", "Keep survivor bots' reserve ammo topped up (no resupplying)");
+	g_needTool         = CreateConVar("sm_zps24ai_need_tool", "1", "Barricaders must fetch a weapon_barricade first");
 	g_radius           = CreateConVar("sm_zps24ai_holdout_radius", "550", "Doors/windows within this distance of the hold-out get barricaded");
 	g_safeDist         = CreateConVar("sm_zps24ai_safe_distance", "260", "Bots with guns back away from zombies closer than this");
-	g_barricaders      = CreateConVar("sm_zps24ai_barricaders", "3", "How many survivor bots barricade at once");
+	g_barricaders      = CreateConVar("sm_zps24ai_barricaders", "0", "How many survivor bots barricade at once (barricading is unfinished; 0 = off)");
 	g_boardsPerOpening = CreateConVar("sm_zps24ai_boards", "3", "Boards to put on each door/window");
 	g_debug            = CreateConVar("sm_zps24ai_debug", "0", "Log AI decisions");
 	g_upperHeight      = CreateConVar("sm_zps24ai_upper_height", "80", "Nav areas this much above the hold-out floor count as upper floor / roof / balcony");
@@ -95,6 +114,7 @@ public void OnPluginStart()
 	delete gd;
 
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
+	HookEventEx("player_death", Event_PlayerDeath, EventHookMode_Post);
 	RegServerCmd("sm_zps24ai_status", Cmd_Status, "Show the hold-out and barricade progress");
 	ResetRound();
 }
@@ -110,10 +130,46 @@ void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 	ResetRound();
 }
 
+void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+	int victim = GetClientOfUserId(event.GetInt("userid"));
+	if (victim > 0 && IsClientInGame(victim) && GetClientTeam(victim) == TEAM_SURVIVORS)
+		g_survivorDeaths++;
+}
+
+// Overrun: 3+ survivors died at this hold-out within two minutes and zombies are inside it.
+// Remember it as bad and pick the next-best building.
+void CheckOverrun()
+{
+	if (!g_haveHoldout || GetGameTime() - g_holdoutChosenAt > 120.0 && g_survivorDeaths < 3)
+		return;
+	if (g_survivorDeaths < 3)
+		return;
+	int inside = 0;
+	float pos[3];
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+			continue;
+		GetClientAbsOrigin(i, pos);
+		if (GetVectorDistance(pos, g_holdout) < g_radius.FloatValue)
+			inside++;
+	}
+	if (inside < 3)
+		return;
+	if (g_badHoldoutCount < sizeof(g_badHoldout))
+		g_badHoldout[g_badHoldoutCount++] = g_holdout;
+	Debug("Overrun at %.0f %.0f %.0f (%d deaths, %d zombies inside): relocating", g_holdout[0], g_holdout[1], g_holdout[2], g_survivorDeaths, inside);
+	g_haveHoldout = false;
+	g_defendCount = 0;
+}
+
 void ResetRound()
 {
 	g_haveHoldout = false;
 	g_openingCount = 0;
+	g_survivorDeaths = 0;
+	g_badHoldoutCount = 0;
 	g_defendCount = 0;
 	g_roundStart = GetGameTime();
 	for (int i = 0; i <= MaxClients; i++)
@@ -121,6 +177,7 @@ void ResetRound()
 		g_job[i] = JOB_NONE;
 		g_carryProp[i] = INVALID_ENT_REFERENCE;
 		g_givenGun[i] = INVALID_ENT_REFERENCE;
+		Unstick_Reset(i);
 		g_scripted[i] = false;
 		g_restockUntil[i] = 0.0;
 	}
@@ -132,7 +189,7 @@ void Debug(const char[] fmt, any ...)
 		return;
 	char buf[256];
 	VFormat(buf, sizeof(buf), fmt, 2);
-	PrintToServer("[zps24ai] %s", buf);
+	LogMessage("%s", buf);   // SourceMod log file: not delayed like the console under gdb
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -149,7 +206,56 @@ void EntityCenter(int ent, float out[3])
 		out[i] = origin[i] + (mins[i] + maxs[i]) * 0.5;
 }
 
-int CollectOpenings(float pos[][3], int max)
+// Height of the open space above a point: short = under a roof (inside), long/sky = outside.
+float SpaceAbove(const float from[3])
+{
+	float to[3];
+	to = from;
+	to[2] += 2000.0;
+	TR_TraceRayFilter(from, to, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceIgnoreSelf, 0);
+	if (!TR_DidHit() || (TR_GetSurfaceFlags() & SURF_SKY))
+		return 2000.0;
+	float hit[3];
+	TR_GetEndPosition(hit);
+	return hit[2] - from[2];
+}
+
+// Is this a window or door in an outside wall? On success, inside = unit vector into the building.
+// The opening's thin horizontal axis is its facing; one side must be roofed and the other open.
+bool IsExteriorOpening(int ent, const float center[3], float inside[3])
+{
+	char cls[64];
+	GetEntityClassname(ent, cls, sizeof(cls));
+	float mins[3], maxs[3];
+	GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+	GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+	float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1], sz = maxs[2] - mins[2];
+
+	bool isDoor = StrContains(cls, "door") != -1;
+	bool isGlass = StrEqual(cls, "func_breakable_surf");
+	// Window/door shaped: thin in one horizontal axis, a sensible height.
+	float thin = sx < sy ? sx : sy, wide = sx < sy ? sy : sx;
+	if (thin > 16.0 || wide < 24.0 || sz < 24.0 || sz > 140.0)
+		return false;
+	if (!isDoor && !isGlass && !StrEqual(cls, "func_breakable"))
+		return false;
+	if (isDoor && sz < 70.0)
+		return false;
+
+	float n[3];
+	n[0] = sx < sy ? 1.0 : 0.0;
+	n[1] = sx < sy ? 0.0 : 1.0;
+	n[2] = 0.0;
+	float a[3], b[3];
+	for (int i = 0; i < 3; i++) { a[i] = center[i] + n[i] * 48.0; b[i] = center[i] - n[i] * 48.0; }
+	float ua = SpaceAbove(a), ub = SpaceAbove(b);
+	// One side under a roof (< 400 units of headroom), the other open or much higher.
+	if (ua < 400.0 && ub > ua + 300.0)       { inside = n; return true; }
+	if (ub < 400.0 && ua > ub + 300.0)       { for (int i = 0; i < 3; i++) inside[i] = -n[i]; return true; }
+	return false;
+}
+
+int CollectOpenings(float pos[][3], float inside[][3], int max)
 {
 	static const char classes[][] = { "func_door_rotating", "func_door", "prop_door_rotating", "func_breakable_surf", "func_breakable" };
 	int n = 0;
@@ -159,7 +265,8 @@ int CollectOpenings(float pos[][3], int max)
 		while ((ent = FindEntityByClassname(ent, classes[c])) != -1 && n < max)
 		{
 			EntityCenter(ent, pos[n]);
-			n++;
+			if (IsExteriorOpening(ent, pos[n], inside[n]))
+				n++;
 		}
 	}
 	return n;
@@ -167,8 +274,8 @@ int CollectOpenings(float pos[][3], int max)
 
 void ChooseHoldout()
 {
-	float all[MAX_OPENINGS * 4][3];
-	int count = CollectOpenings(all, sizeof(all));
+	float all[MAX_OPENINGS * 4][3], allInside[MAX_OPENINGS * 4][3];
+	int count = CollectOpenings(all, allInside, sizeof(all));
 	if (count == 0)
 		return;
 
@@ -177,6 +284,11 @@ void ChooseHoldout()
 	int best = -1, bestScore = -1;
 	for (int i = 0; i < count; i++)
 	{
+		bool bad = false;
+		for (int k = 0; k < g_badHoldoutCount; k++)
+			if (GetVectorDistance(all[i], g_badHoldout[k]) < r) { bad = true; break; }
+		if (bad)
+			continue;
 		int score = 0;
 		for (int j = 0; j < count; j++)
 			if (GetVectorDistance(all[i], all[j]) <= r)
@@ -197,6 +309,7 @@ void ChooseHoldout()
 		if (g_openingCount < MAX_OPENINGS)
 		{
 			g_openingPos[g_openingCount] = all[j];
+			g_openingInside[g_openingCount] = allInside[j];
 			g_openingBoards[g_openingCount] = 0;
 			g_openingClaim[g_openingCount] = 0;
 			g_openingDone[g_openingCount] = false;
@@ -210,8 +323,10 @@ void ChooseHoldout()
 		return;
 	NavBotNavArea.GetCenter(area, g_holdout);
 	g_haveHoldout = true;
+	g_holdoutChosenAt = GetGameTime();
+	g_survivorDeaths = 0;
 	BuildDefendSpots(area);
-	Debug("Hold-out at %.0f %.0f %.0f with %d openings", g_holdout[0], g_holdout[1], g_holdout[2], g_openingCount);
+	Debug("Hold-out at %.0f %.0f %.0f with %d exterior openings (of %d on the map)", g_holdout[0], g_holdout[1], g_holdout[2], g_openingCount, count);
 }
 
 // Rank the hold-out building's walkable areas: highest first (upper floors, roofs, balconies),
@@ -469,6 +584,7 @@ void ReleaseJob(int client, bool done)
 	}
 	g_job[client] = JOB_NONE;
 	g_carryProp[client] = INVALID_ENT_REFERENCE;
+	g_hammerUntil[client] = 0.0;
 }
 
 // Move goals must be on the nav mesh or NavBot can't path to them (door/window centers sit
@@ -488,9 +604,7 @@ void SnapToNav(const float pos[3], float out[3])
 void StandPoint(int o, float out[3])
 {
 	float dir[3];
-	SubtractVectors(g_holdout, g_openingPos[o], dir);
-	dir[2] = 0.0;
-	NormalizeVector(dir, dir);
+	dir = g_openingInside[o];               // stand indoors, facing out through the opening
 	ScaleVector(dir, 56.0);
 	float raw[3];
 	AddVectors(g_openingPos[o], dir, raw);
@@ -594,6 +708,60 @@ bool DoFurniture(int client, NavBot bot, float moveGoal[3])
 	return false;
 }
 
+// ZPS 2.4 has a carry-weight limit; a bot with a main gun and melee weapons can't pick up the
+// barricade hammer. Drop the main gun and melee weapons (keep the pistol, hands and phone) through
+// the game's own "dropweapon" so ZPS updates the weight. Returns true while still dropping.
+bool ShedWeight(int client, NavBot bot)
+{
+	char cls[64];
+	int size = GetEntPropArraySize(client, Prop_Send, "m_hMyWeapons");
+	for (int i = 0; i < size; i++)
+	{
+		int w = GetEntPropEnt(client, Prop_Send, "m_hMyWeapons", i);
+		if (w <= 0 || !IsValidEntity(w))
+			continue;
+		GetEntityClassname(w, cls, sizeof(cls));
+		if (StrEqual(cls, "weapon_emptyhand") || StrEqual(cls, "weapon_phone") || StrEqual(cls, "weapon_barricade") || (IsGun(w) && IsPistol(w)))
+			continue;
+		if (GetGameTime() < g_nextUse[client])
+			return true;
+		if (GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != w)
+		{
+			char cmd[80];
+			Format(cmd, sizeof(cmd), "use %s", cls);
+			bot.DelayedFakeClientCommand(cmd);
+		}
+		else
+		{
+			bot.DelayedFakeClientCommand("dropweapon");
+			Debug("%N drops %s to make room for the hammer", client, cls);
+		}
+		g_nextUse[client] = GetGameTime() + 0.6;
+		return true;
+	}
+	return false;
+}
+
+// Boards nailed up so far around an opening (models/zp_props/barricades/barricade_*.mdl).
+int CountBoardsNear(const float pos[3], float radius)
+{
+	int n = 0;
+	char model[128];
+	for (int ent = MaxClients + 1; ent < GetMaxEntities(); ent++)
+	{
+		if (!IsValidEntity(ent) || !HasEntProp(ent, Prop_Data, "m_ModelName"))
+			continue;
+		GetEntPropString(ent, Prop_Data, "m_ModelName", model, sizeof(model));
+		if (StrContains(model, "barricades/barricade_", false) == -1)
+			continue;
+		float o[3];
+		GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", o);
+		if (GetVectorDistance(o, pos) <= radius)
+			n++;
+	}
+	return n;
+}
+
 // Returns true while the bot should keep moving towards moveGoal.
 bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 {
@@ -604,10 +772,12 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 		return false;
 	}
 
-	// 1. Get a barricade tool if we don't have one.
+	// 1. Get a barricade tool if we don't have one (dropping heavy items first).
 	int tool = FindOwnedWeapon(client, "weapon_barricade");
-	if (tool == -1)
+	if (tool == -1 && g_needTool.BoolValue)
 	{
+		if (ShedWeight(client, bot))
+			return false;
 		float dist;
 		int free = NearestFreeBarricade(client, dist);
 		if (free == -1)
@@ -645,7 +815,7 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 	}
 
 	// Out of boards: drop the job (another bot with a fresh tool can finish).
-	if (GetEntProp(tool, Prop_Send, "m_iClip1") <= 0 && GetEntProp(client, Prop_Send, "m_iAmmo", _, AMMO_BARRICADE) <= 0)
+	if (tool != -1 && g_needTool.BoolValue && GetEntProp(tool, Prop_Send, "m_iClip1") <= 0 && GetEntProp(client, Prop_Send, "m_iAmmo", _, AMMO_BARRICADE) <= 0)
 	{
 		ReleaseJob(client, false);
 		return false;
@@ -660,10 +830,64 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 		return true;
 
 	// 3. Hold the barricade, aim at spots across the opening, hammer where the game says it fits.
+	if (tool == -1)
+		return false;
 	if (GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != tool)
 	{
 		bot.DelayedFakeClientCommand("use weapon_barricade");
 		return false;
+	}
+	Address ctrl = bot.GetPlayerControllerInterface();
+
+	// Hammering: the game re-checks CanAttachBarricade() every frame of the hammer animation and
+	// only attaches the board at the end, so keep the aim locked and hold attack the whole time.
+	if (g_hammerUntil[client] > 0.0)
+	{
+		if (GetGameTime() < g_hammerUntil[client])
+		{
+			NavBotPlayerControllerInterface.AimAtPos(ctrl, g_hammerAim[client], LOOK_PRIORITY, 0.5, "Hammering a board");
+			float t = GetGameTime() - g_hammerStart[client];
+			static float lastProbe[MAXPLAYERS + 1];
+			if ((t > 1.0 && lastProbe[client] < 1.0) || (t > 3.0 && lastProbe[client] < 3.0))
+			{
+				char active[64] = "-";
+				int aw = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+				if (aw > 0) GetEntityClassname(aw, active, sizeof(active));
+				Debug("%N hammer t=%.1f holding %s canAttach=%d", client, t, active, aw == tool ? SDKCall(g_canAttach, tool) : -1);
+			}
+			lastProbe[client] = t;
+			switch (g_hammerMode[client])
+			{
+				case 0: NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.3);   // hold attack
+				case 1: if (t < 0.3 || (t > 1.5 && t < 1.8)) NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.2); // click, click again
+				case 2: { if (t < 0.3) NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.2);
+					else if (t > 1.0 && t < 1.3) NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKSEC, 0.2); } // click, then attack2
+				case 3: { if (t < 0.3) NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.2);
+					else if (t > 1.0 && t < 1.3) NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_RELOAD, 0.2); }    // click, then reload
+				case 4: if (t < 0.3) NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.2);                 // single click, wait
+			}
+			return false;
+		}
+		g_hammerUntil[client] = 0.0;
+		int now = CountBoardsNear(g_openingPos[o], 160.0);
+		if (now > g_hammerBoardsBefore[client])
+		{
+			if (g_modeWorks != g_hammerMode[client])
+				LogMessage("Hammer input pattern %d places boards", g_hammerMode[client]);
+			g_modeWorks = g_hammerMode[client];
+			g_openingBoards[o]++;
+			Debug("%N nailed a board on opening %d (%d/%d)", client, o, g_openingBoards[o], g_boardsPerOpening.IntValue);
+			if (g_openingBoards[o] >= g_boardsPerOpening.IntValue)
+			{
+				ReleaseJob(client, true);
+				return false;
+			}
+		}
+		else
+		{
+			Debug("%N hammered (pattern %d) but no board appeared at opening %d", client, g_hammerMode[client], o);
+			g_aimTry[client]++;
+		}
 	}
 
 	static const float offsets[][3] = { {0.0, 0.0, 0.0}, {0.0, 0.0, 20.0}, {0.0, 0.0, -20.0}, {0.0, 0.0, 36.0}, {0.0, 0.0, -36.0} };
@@ -671,18 +895,20 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 	int t = g_aimTry[client] % sizeof(offsets);
 	AddVectors(g_openingPos[o], offsets[t], aim);
 
-	Address ctrl = bot.GetPlayerControllerInterface();
 	NavBotPlayerControllerInterface.AimAtPos(ctrl, aim, LOOK_PRIORITY, 0.5, "Barricading");
 	if (!NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
 		return false;
 
 	if (SDKCall(g_canAttach, tool))
 	{
-		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.4);
-		g_openingBoards[o]++;
-		Debug("%N boards opening %d (%d/%d)", client, o, g_openingBoards[o], g_boardsPerOpening.IntValue);
-		if (g_openingBoards[o] >= g_boardsPerOpening.IntValue)
-			ReleaseJob(client, true);
+		// Start hammering here and keep at it for the whole animation.
+		g_hammerAim[client] = aim;
+		g_hammerMode[client] = g_modeWorks >= 0 ? g_modeWorks : (g_modeNext++ % 5);
+		g_hammerStart[client] = GetGameTime();
+		g_hammerUntil[client] = GetGameTime() + 4.5;
+		g_hammerBoardsBefore[client] = CountBoardsNear(g_openingPos[o], 160.0);
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.3);
+		return false;
 	}
 	g_aimTry[client]++;
 	if (g_aimTry[client] > 40)          // nothing fits here (open space, wrong side...): skip it
@@ -696,16 +922,58 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 // ---------------------------------------------------------------------------------------------
 // Free guns and unlimited ammo
 
+// Main guns handed out on top of the pistol ZPS gives everyone at spawn.
 static const char g_giveList[][] = { "weapon_ak47", "weapon_m4", "weapon_mp5", "weapon_870", "weapon_supershorty",
-	"weapon_winchester", "weapon_revolver", "weapon_glock18c", "weapon_usp", "weapon_glock" };
+	"weapon_winchester", "weapon_revolver" };
+
+bool IsPistol(int weapon)
+{
+	char cls[64];
+	GetEntityClassname(weapon, cls, sizeof(cls));
+	return StrEqual(cls, "weapon_glock") || StrEqual(cls, "weapon_glock18c") || StrEqual(cls, "weapon_usp") || StrEqual(cls, "weapon_ppk");
+}
 
 bool HasGun(int client)
 {
+	return BestGun(client) != -1;
+}
+
+// Best gun the bot owns: a main gun if it has one, else a pistol, else -1.
+int BestGun(int client)
+{
+	int pistol = -1;
 	int size = GetEntPropArraySize(client, Prop_Send, "m_hMyWeapons");
 	for (int i = 0; i < size; i++)
-		if (IsGun(GetEntPropEnt(client, Prop_Send, "m_hMyWeapons", i)))
-			return true;
-	return false;
+	{
+		int w = GetEntPropEnt(client, Prop_Send, "m_hMyWeapons", i);
+		if (!IsGun(w))
+			continue;
+		if (!IsPistol(w))
+			return w;
+		pistol = w;
+	}
+	return pistol;
+}
+
+bool HasMainGun(int client)
+{
+	int w = BestGun(client);
+	return w != -1 && !IsPistol(w);
+}
+
+// Survivor bots that aren't barricading hold their best gun (NavBot only switches when a fight
+// starts, so they walked around with keyboards and brooms).
+void HoldBestGun(int client, NavBot bot)
+{
+	if (g_job[client] == JOB_BARRICADE || GetGameTime() < g_nextUse[client])
+		return;
+	int best = BestGun(client);
+	if (best == -1 || GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") == best)
+		return;
+	char cls[64], cmd[80];
+	GetEntityClassname(best, cls, sizeof(cls));
+	Format(cmd, sizeof(cmd), "use %s", cls);
+	bot.DelayedFakeClientCommand(cmd);
 }
 
 // Weapons in 2.4 are picked up with E. Spawn a random gun right in front of the bot's face and
@@ -713,15 +981,35 @@ bool HasGun(int client)
 // Returns true while the bot should stand still and finish picking it up.
 bool ArmBot(int client, NavBot bot)
 {
-	if (!g_giveWeapons.BoolValue || HasGun(client))
+	static float lastLog[MAXPLAYERS + 1];
+	bool logNow = GetGameTime() - lastLog[client] > 5.0;
+	if (logNow) lastLog[client] = GetGameTime();
+
+	if (g_job[client] == JOB_BARRICADE || GetGameTime() < g_armPauseUntil[client])
+		return false;   // barricaders travel light; bots too heavy to take a gun wait a minute
+	if (!g_giveWeapons.BoolValue || HasMainGun(client))
 	{
+		g_armTries[client] = 0;
+		if (logNow) Debug("%N: ArmBot skip (give=%d mainGun=%d)", client, g_giveWeapons.BoolValue, HasMainGun(client));
 		g_givenGun[client] = INVALID_ENT_REFERENCE;
 		return false;
 	}
 	if (GetGameTime() < g_nextUse[client])
+	{
+		if (logNow) Debug("%N: ArmBot waiting %.1f s", client, g_nextUse[client] - GetGameTime());
 		return true;
+	}
 
 	int gun = EntRefToEntIndex(g_givenGun[client]);
+	if (gun != INVALID_ENT_REFERENCE && GetEntPropEnt(gun, Prop_Send, "m_hOwnerEntity") == -1 && ++g_armTries[client] > 5)
+	{
+		// Still on the floor after several E presses: the bot is at its weight limit.
+		AcceptEntityInput(gun, "Kill");
+		g_givenGun[client] = INVALID_ENT_REFERENCE;
+		g_armTries[client] = 0;
+		g_armPauseUntil[client] = GetGameTime() + 60.0;
+		return false;
+	}
 	if (gun == INVALID_ENT_REFERENCE || GetEntPropEnt(gun, Prop_Send, "m_hOwnerEntity") != -1)
 	{
 		gun = CreateEntityByName(g_giveList[GetRandomInt(0, sizeof(g_giveList) - 1)]);
@@ -744,6 +1032,9 @@ bool ArmBot(int client, NavBot bot)
 	NavBotPlayerControllerInterface.AimAtPos(ctrl, spot, LOOK_PRIORITY, 0.6, "Taking a gun");
 	NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.3);
 	g_nextUse[client] = GetGameTime() + 1.0;
+	char cls[64];
+	GetEntityClassname(gun, cls, sizeof(cls));
+	Debug("%N: offering %s (weight check: owns %d weapons)", client, cls, GetEntPropArraySize(client, Prop_Send, "m_hMyWeapons"));
 	return true;
 }
 
@@ -761,6 +1052,20 @@ void RefillAmmo(int client)
 // ---------------------------------------------------------------------------------------------
 // Main loop
 
+Action MoveTo(int client, float moveGoal[3])
+{
+	float me[3];
+	GetClientAbsOrigin(client, me);
+	Unstick_WantMove(client, me, moveGoal);
+	return Plugin_Changed;
+}
+
+Action Hold(int client)
+{
+	g_us_wantMove[client] = false;
+	return Plugin_Continue;
+}
+
 Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeType)
 {
 	int client = bot.Index;
@@ -777,26 +1082,52 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 
 	if (ArmBot(client, bot))
-		return Plugin_Continue;
+		return Hold(client);
+	if (Unstick_Goal(client, moveGoal))
+	{
+		routeType = NAVBOT_FASTEST_ROUTE;
+		return Plugin_Changed;              // detour around whatever we're stuck on
+	}
 
 	OpenDoorAhead(client, bot);
 	float me[3];
 	GetClientAbsOrigin(client, me);
 
 	// Keep a safe distance from zombies while holding a gun.
+	// Barricaders commit to the job and only back off from zombies right on top of them.
 	float zdist;
-	int zombie = NearestZombie(client, g_safeDist.FloatValue, zdist);
+	float safe = g_job[client] == JOB_BARRICADE ? 120.0 : g_safeDist.FloatValue;
+	int zombie = NearestZombie(client, safe, zdist);
 	if (zombie && IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
 	{
-		float them[3], away[3];
+		float them[3];
 		GetClientAbsOrigin(zombie, them);
-		SubtractVectors(me, them, away);
-		away[2] = 0.0;
-		NormalizeVector(away, away);
-		ScaleVector(away, 200.0);
-		AddVectors(me, away, moveGoal);
+		// Fall back inside the hold-out: the defend spot farthest from the zombie, if it's a real
+		// step back; otherwise just step straight away.
+		int best = -1;
+		float bestScore = GetVectorDistance(me, them) + 150.0;
+		for (int i = 0; i < g_defendCount; i++)
+		{
+			float d = GetVectorDistance(g_defendPos[i], them);
+			if (d > bestScore && GetVectorDistance(g_defendPos[i], me) < 700.0) { bestScore = d; best = i; }
+		}
+		if (best != -1)
+		{
+			moveGoal = g_defendPos[best];
+			g_defendIdx[client] = best;
+			g_defendSwitch[client] = GetGameTime() + 20.0;
+		}
+		else
+		{
+			float away[3];
+			SubtractVectors(me, them, away);
+			away[2] = 0.0;
+			NormalizeVector(away, away);
+			ScaleVector(away, 200.0);
+			AddVectors(me, away, moveGoal);
+		}
 		routeType = NAVBOT_FASTEST_ROUTE;
-		return Plugin_Changed;
+		return MoveTo(client, moveGoal);
 	}
 
 	if (g_job[client] == JOB_BARRICADE)
@@ -804,23 +1135,41 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		if (DoBarricade(client, bot, moveGoal))
 		{
 			routeType = NAVBOT_SAFEST_ROUTE;
-			return Plugin_Changed;
+			return MoveTo(client, moveGoal);
 		}
-		return Plugin_Continue;
+		return Hold(client);
 	}
 
-	// Defend: each bot holds its own spot (upper floor / roof / balcony / corner) and shoots from there.
+	// Defend: hold a spot (upper floor / roof / balcony / corner), move to another one every
+	// 25-45 s, and keep turning to watch different doors and windows.
 	float spot[3];
 	spot = g_holdout;
 	if (g_defendCount > 0)
-		spot = g_defendPos[client % g_defendCount];
+	{
+		float zd;
+		bool calm = NearestZombie(client, 900.0, zd) == 0;
+		if (GetGameTime() >= g_defendSwitch[client] && calm)
+		{
+			int top = g_defendCount < 8 ? g_defendCount : 8;
+			g_defendIdx[client] = GetRandomInt(0, top - 1);
+			g_defendSwitch[client] = GetGameTime() + GetRandomFloat(25.0, 45.0);
+		}
+		spot = g_defendPos[g_defendIdx[client] % g_defendCount];
+	}
 	if (GetVectorDistance(me, spot) > 64.0)
 	{
 		moveGoal = spot;
 		routeType = NAVBOT_SAFEST_ROUTE;
-		return Plugin_Changed;
+		return MoveTo(client, moveGoal);
 	}
-	return Plugin_Continue;
+	if (GetGameTime() >= g_lookAround[client] && g_openingCount > 0)
+	{
+		g_lookAround[client] = GetGameTime() + GetRandomFloat(3.0, 5.0);
+		float watch[3];
+		watch = g_openingPos[GetRandomInt(0, g_openingCount - 1)];
+		NavBotPlayerControllerInterface.AimAtPos(bot.GetPlayerControllerInterface(), watch, LOOK_SEARCH, 2.0, "Watching an entrance");
+	}
+	return Hold(client);
 }
 
 // Bots that haven't moved for a second next to a closed door get it opened, exactly what E does.
@@ -868,6 +1217,7 @@ Action Timer_Think(Handle timer)
 		return Plugin_Continue;
 	if (GetGameTime() - g_roundStart < g_equipTime.FloatValue)
 		return Plugin_Continue;                  // gear-up phase
+	CheckOverrun();
 	if (!g_haveHoldout)
 		ChooseHoldout();
 	if (!g_haveHoldout)
@@ -883,6 +1233,8 @@ Action Timer_Think(Handle timer)
 		NavBot bot = NavBotManager.GetNavBotByIndex(client);
 
 		RefillAmmo(client);
+		HoldBestGun(client, bot);
+		Unstick_Track(client, bot);
 
 		// Out of gun ammo: release the bot for 20 s so NavBot restocks (only without unlimited ammo).
 		if (!g_infiniteAmmo.BoolValue && g_restockUntil[client] < GetGameTime() && !HasGunAmmo(client))
@@ -912,6 +1264,13 @@ Action Timer_Think(Handle timer)
 
 		if (!g_scripted[client] || !NavBotBehaviorInterface.IsRunningPluginCommand(bot.GetBehaviorInterface()))
 		{
+			// A scripted task left over from a previous load of this plugin would keep calling a
+			// dead callback and leave the bot idle. Stop whatever is running, then start ours.
+			if (NavBotBehaviorInterface.IsRunningPluginCommand(bot.GetBehaviorInterface()))
+			{
+				bot.SendPluginCommand(NAVBOT_PLUGINCMD_STOPCMD);
+				continue;   // start ours on the next tick
+			}
 			bot.SendScriptedPluginCommand(OnScriptedUpdate);
 			g_scripted[client] = true;
 			char task[256];
@@ -952,4 +1311,16 @@ Action Cmd_Status(int args)
 			i, o, g_openingBoards[o], FindOwnedWeapon(i, "weapon_barricade") != -1, fdist, GetVectorDistance(me, stand), active, g_aimTry[i]);
 	}
 	return Plugin_Handled;
+}
+
+// Don't leave bots running a scripted task whose callback is about to disappear.
+public void OnPluginEnd()
+{
+	if (!LibraryExists("navbot"))
+		return;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (IsClientInGame(client) && NavBotManager.IsNavBot(client) && g_scripted[client])
+			NavBotManager.GetNavBotByIndex(client).SendPluginCommand(NAVBOT_PLUGINCMD_STOPCMD);
+	}
 }
