@@ -1,0 +1,48 @@
+"Games"
+{
+	"zps"
+	{
+		"Keys"
+		{
+			"NavGenerationWalkableEnts"		"info_player_human,info_player_zombie,info_player_carrier,point_teleport"
+			"NavGenerationWalkableEntsCenter"		"trigger_useable,trigger_escape"
+			"BotJoinGameCommand"		"joingame,choose1"
+			"HookPlayerRunCMD"		"0"
+			"CUserCmdSize"		"84"
+			"SpoofBotNetworkID"		"1"
+			"UsesWorkshopMaps"		"true"
+			"BotBreakAggressiveList"		"func_breakable,func_breakable_surf,prop_door_rotating,prop_barricade,func_physbox"
+		}
+		"Offsets"
+		{
+			"CGameRules::ShouldCollide"
+			{
+				"linux"		"29"
+			}
+			"CBasePlayer::ProcessUsercmds"
+			{
+				"linux"		"377"
+			}
+			"Event_Killed"
+			{
+				"linux"		"65"
+			}
+			"Event_KilledOther"
+			{
+				"linux"		"66"
+			}
+			"PhysicsSimulate"
+			{
+				"linux"		"101"
+			}
+			"CBaseAnimating::GetBoneTransform"
+			{
+				"linux"		"191"
+			}
+			"CBaseFilter::PassesFilterImpl"
+			{
+				"linux"		"180"
+			}
+		}
+	}
+}

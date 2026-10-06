@@ -1,0 +1,288 @@
+diff --git a/AMBuildScript b/AMBuildScript
+index 05c1da1..dc95f44 100644
+--- a/AMBuildScript
++++ b/AMBuildScript
+@@ -216,7 +216,7 @@ class ExtensionConfig(object):
+       '-pipe',
+       '-fno-strict-aliasing',
+       '-Wall',
+-      '-Werror',
++      
+       '-Wno-unused',
+       '-Wno-switch',
+       '-Wno-array-bounds',
+diff --git a/extension/bot/basebot.cpp b/extension/bot/basebot.cpp
+index 040c942..01982b5 100644
+--- a/extension/bot/basebot.cpp
++++ b/extension/bot/basebot.cpp
+@@ -74,7 +74,7 @@ void CBaseBot::PostAdd()
+ 		entprops->SetEntProp(GetIndex(), Prop_Send, "m_fFlags", FL_CLIENT | FL_FAKECLIENT); // set client and fakeclient flags
+ 	}
+ 
+-	if (m_controller == nullptr)
++	if (m_controller == nullptr && botmanager != nullptr)
+ 	{
+ 		m_controller = botmanager->GetBotController(GetEdict());
+ 	}
+@@ -437,7 +437,7 @@ void CBaseBot::RunUserCommand(CBotCmd* ucmd)
+ 		sdkcalls->CBasePlayer_ProcessUsercmds(GetEntity(), ucmd);
+ 		SnapEyeAngles(ucmd->viewangles);
+ 	}
+-	else
++	else if (m_controller != nullptr)
+ 	{
+ 		m_controller->RunPlayerMove(ucmd);
+ 	}
+@@ -591,7 +591,19 @@ void CBaseBot::TryJoinGame()
+ */
+ void CBaseBot::SelectWeaponByClassname(const char* szclassname)
+ {
+-	m_controller->SetActiveWeapon(szclassname);
++	if (m_controller != nullptr)
++	{
++		m_controller->SetActiveWeapon(szclassname);
++		return;
++	}
++
++	// No IBotController (Source 2007): switch to an owned weapon through CBaseCombatCharacter::Weapon_Switch.
++	edict_t* weapon = nullptr;
++
++	if (Weapon_OwnsThisType(szclassname, &weapon) && weapon != nullptr)
++	{
++		sdkcalls->CBaseCombatCharacter_Weapon_Switch(GetEntity(), UtilHelpers::EdictToBaseEntity(weapon));
++	}
+ }
+ 
+ /**
+@@ -602,7 +614,7 @@ void CBaseBot::SafeWeaponSelectByClassname(const char* szclassname)
+ {
+ 	if (Weapon_OwnsThisType(szclassname))
+ 	{
+-		m_controller->SetActiveWeapon(szclassname);
++		SelectWeaponByClassname(szclassname);
+ 	}
+ }
+ 
+diff --git a/extension/extension.cpp b/extension/extension.cpp
+index 5ce290b..491af0b 100644
+--- a/extension/extension.cpp
++++ b/extension/extension.cpp
+@@ -126,6 +126,7 @@ static ConVar cvar_draw_player_move("sm_navbot_debug_draw_player_move", "0", FCV
+ static_assert(sizeof(Vector) == 12, "Size of Vector class is not 12 bytes (3 x 4 bytes float)!");
+ 
+ SH_DECL_HOOK1_void(IServerGameDLL, GameFrame, SH_NOATTRIB, 0, bool);
++SH_DECL_HOOK1(IVEngineServer, GetPlayerNetworkIDString, SH_NOATTRIB, 0, const char*, const edict_t*);
+ 
+ #if SOURCE_ENGINE <= SE_DARKMESSIAH
+ 	// Source 2006
+@@ -194,6 +195,7 @@ namespace Utils
+ NavBotExt::NavBotExt()
+ {
+ 	m_hookruncmd = false;
++	m_spoofbotnetworkid = false;
+ 	m_botsAreSupported = true; // default to true, set to false on failures
+ 	m_cfg_navbot = nullptr;
+ 	m_cfg_sdktools = nullptr;
+@@ -263,6 +265,17 @@ bool NavBotExt::SDK_OnLoad(char* error, size_t maxlen, bool late)
+ 		m_hookruncmd = (i != 0);
+ 	}
+ 
++	// Some mods parse every player's network ID as "STEAM_X:Y:Z" without checking it. ZPS 2.4's
++	// CHL2MPRules::JoinRound does memmove(id, id + 10, strlen(id) + 1 - 10), which smashes the stack
++	// for a bot's "BOT" ID. With this key set, bots get a well-formed fake ID instead.
++	value = m_cfg_navbot->GetKeyValue("SpoofBotNetworkID");
++
++	if (value && atoi(value) != 0 && !m_spoofbotnetworkid)
++	{
++		m_spoofbotnetworkid = true;
++		SH_ADD_HOOK(IVEngineServer, GetPlayerNetworkIDString, engine, SH_MEMBER(this, &NavBotExt::Hook_GetPlayerNetworkIDString), true);
++	}
++
+ 	value = m_cfg_navbot->GetKeyValue("NoBots");
+ 
+ 	if (value)
+@@ -347,6 +360,12 @@ bool NavBotExt::SDK_OnLoad(char* error, size_t maxlen, bool late)
+ 
+ void NavBotExt::SDK_OnUnload()
+ {
++	if (m_spoofbotnetworkid)
++	{
++		SH_REMOVE_HOOK(IVEngineServer, GetPlayerNetworkIDString, engine, SH_MEMBER(this, &NavBotExt::Hook_GetPlayerNetworkIDString), true);
++		m_spoofbotnetworkid = false;
++	}
++
+ 	CDynamicPriorityManager::GetManager().OnShutdown();
+ 	spmisc::UnregisterNavBotMultiTargetFilter();
+ 	gameconfs->CloseGameConfigFile(m_cfg_navbot);
+@@ -499,7 +518,14 @@ bool NavBotExt::SDK_OnMetamodLoad(ISmmAPI* ismm, char* error, size_t maxlen, boo
+ 	}
+ #endif // EXT_DEBUG
+ 
+-	GET_V_IFACE_CURRENT(GetServerFactory, botmanager, IBotManager, INTERFACEVERSION_PLAYERBOTMANAGER);
++	// Optional: old Source 2007 mods (e.g. ZPS 2.4) don't expose IBotManager. Without it, bots are
++	// created with CreateFakeClient and driven through CBasePlayer::ProcessUsercmds (see gamedata).
++	botmanager = static_cast<IBotManager*>(ismm->VInterfaceMatch(ismm->GetServerFactory(), INTERFACEVERSION_PLAYERBOTMANAGER));
++
++	if (botmanager == nullptr)
++	{
++		ismm->LogMsg(this, "IBotManager (%s) not available, using CreateFakeClient + ProcessUsercmds.", INTERFACEVERSION_PLAYERBOTMANAGER);
++	}
+ 
+ 	gpGlobals = ismm->GetCGlobals();
+ 
+@@ -698,3 +724,25 @@ void NavBotExt::Hook_ClientCommandKeyValues(edict_t* pEntity, KeyValues* pKeyVal
+ }
+ #endif // EXT_DEBUG
+ 
++
++const char* NavBotExt::Hook_GetPlayerNetworkIDString(const edict_t* edict)
++{
++	const char* original = META_RESULT_ORIG_RET(const char*);
++
++	if (original == nullptr || std::strcmp(original, "BOT") != 0)
++	{
++		RETURN_META_VALUE(MRES_IGNORED, nullptr);
++	}
++
++	// One buffer per client slot; the returned pointer must stay valid after the call.
++	static char s_fakeids[ABSOLUTE_PLAYER_LIMIT + 1][32];
++	const int index = gamehelpers->IndexOfEdict(const_cast<edict_t*>(edict));
++
++	if (index <= 0 || index > ABSOLUTE_PLAYER_LIMIT)
++	{
++		RETURN_META_VALUE(MRES_IGNORED, nullptr);
++	}
++
++	ke::SafeSprintf(s_fakeids[index], sizeof(s_fakeids[index]), "STEAM_0:0:%d", 1000 + index);
++	RETURN_META_VALUE(MRES_OVERRIDE, s_fakeids[index]);
++}
+diff --git a/extension/extension.h b/extension/extension.h
+index 77c3dd4..1e0e6b3 100644
+--- a/extension/extension.h
++++ b/extension/extension.h
+@@ -285,6 +285,7 @@ public:
+ 	}
+ 
+ 	void Hook_GameFrame(bool simulating); // Post hook
++	const char* Hook_GetPlayerNetworkIDString(const edict_t* edict); // Post hook
+ 
+ #if SOURCE_ENGINE <= SE_DARKMESSIAH
+ 	// Source 2006
+@@ -311,6 +312,7 @@ public:
+ 
+ private:
+ 	bool m_hookruncmd;
++	bool m_spoofbotnetworkid; // see Hook_GetPlayerNetworkIDString
+ 	bool m_botsAreSupported; // true if it's possible to add bots
+ 	SourceMod::IGameConfig* m_cfg_navbot;
+ 	SourceMod::IGameConfig* m_cfg_sdktools;
+diff --git a/extension/manager.cpp b/extension/manager.cpp
+index 50a7e6e..f6cd6ed 100644
+--- a/extension/manager.cpp
++++ b/extension/manager.cpp
+@@ -567,7 +567,7 @@ void CExtManager::AddBot(std::string* newbotname, edict_t** newbotedict)
+ 	case BotCreateMethod::BOTMANAGER:
+ 		[[fallthrough]];
+ 	default:
+-		edict = botmanager->CreateBot(finalname);
++		edict = botmanager ? botmanager->CreateBot(finalname) : engine->CreateFakeClient(finalname);
+ 		break;
+ 	}
+ 
+diff --git a/extension/navmesh/nav_area.cpp b/extension/navmesh/nav_area.cpp
+index e802007..514c76e 100644
+--- a/extension/navmesh/nav_area.cpp
++++ b/extension/navmesh/nav_area.cpp
+@@ -89,7 +89,10 @@ bool UTIL_IsCommandIssuedByServerAdmin()
+ {
+ 	if (engine->IsDedicatedServer()) 
+ 	{
+-		return false;
++		// Server-side ConCommands can only be run from the dedicated server's console or RCON,
++		// never by connected clients, so allow nav commands there. Needed for mods whose client
++		// can't host a listen server with this build (e.g. ZPS 2.4: Windows client, Linux server).
++		return true;
+ 	}
+ 
+ 	for (int i = 2; i <= gpGlobals->maxClients; i++) 
+diff --git a/extension/util/sdkcalls.cpp b/extension/util/sdkcalls.cpp
+index 1891972..4b6f556 100644
+--- a/extension/util/sdkcalls.cpp
++++ b/extension/util/sdkcalls.cpp
+@@ -4,6 +4,8 @@
+ #include <cstring>
+ 
+ #include <extension.h>
++#include <new>
++#include <cstdlib>
+ 
+ #if SOURCE_ENGINE == SE_TF2 || SOURCE_ENGINE == SE_DODS || SOURCE_ENGINE == SE_CSS || SOURCE_ENGINE == SE_HL2DM
+ class CBasePlayer;
+@@ -27,6 +29,7 @@ CSDKCaller::CSDKCaller()
+ 	m_call_cgr_shouldcollide = nullptr;
+ 	m_offsetof_cbp_processusercmds = invalid_offset();
+ 	m_call_cbp_processusercmds = nullptr;
++	m_usercmd_size = sizeof(CUserCmd);
+ 	m_offsetof_cba_getbonetransform = invalid_offset();
+ 	m_call_cba_getbonetransform = nullptr;
+ 	InitVCallSetup(m_call_cbe_acceptinput);
+@@ -80,6 +83,15 @@ bool CSDKCaller::Init()
+ 		fail = true;
+ 	}
+ 
++	{
++		const char* cmdsize = cfg_navbot->GetKeyValue("CUserCmdSize");
++
++		if (cmdsize != nullptr && std::atoi(cmdsize) > static_cast<int>(sizeof(CUserCmd)))
++		{
++			m_usercmd_size = static_cast<std::size_t>(std::atoi(cmdsize));
++		}
++	}
++
+ 	if (!cfg_navbot->GetOffset("CBasePlayer::ProcessUsercmds", &m_offsetof_cbp_processusercmds))
+ 	{
+ 		// don't fail, this is optional
+@@ -147,7 +159,20 @@ bool CSDKCaller::CGameRules_ShouldCollide(CGameRules* pGR, int collisionGroup0,
+ 
+ void CSDKCaller::CBasePlayer_ProcessUsercmds(CBaseEntity* pBP, CBotCmd* botcmd)
+ {
+-	CUserCmd ucmd;
++	// Zero-filled storage big enough for the game's own CUserCmd. Fields a mod appends after the SDK
++	// layout stay zeroed, which is a valid empty state (e.g. an empty CUtlVector on ZPS 2.4).
++	alignas(16) unsigned char storage[256] = {};
++	unsigned char* mem = storage;
++	std::unique_ptr<unsigned char[]> heap;
++
++	if (m_usercmd_size > sizeof(storage))
++	{
++		heap = std::make_unique<unsigned char[]>(m_usercmd_size);
++		std::memset(heap.get(), 0, m_usercmd_size);
++		mem = heap.get();
++	}
++
++	CUserCmd& ucmd = *new (mem) CUserCmd();
+ 
+ 	ucmd.command_number = botcmd->command_number;
+ 	ucmd.tick_count = botcmd->tick_count;
+@@ -166,6 +191,7 @@ void CSDKCaller::CBasePlayer_ProcessUsercmds(CBaseEntity* pBP, CBotCmd* botcmd)
+ 	ArgBuffer<void*, void*, int, int, int, bool> vstk(pBP, static_cast<void*>(&ucmd), 1, 1, 0, false);
+ 
+ 	m_call_cbp_processusercmds->Execute(vstk, nullptr);
++	ucmd.~CUserCmd();
+ }
+ 
+ void CSDKCaller::CBaseAnimating_GetBoneTransform(CBaseEntity* pBA, int bone, matrix3x4_t* result)
+diff --git a/extension/util/sdkcalls.h b/extension/util/sdkcalls.h
+index df23b24..0e9224f 100644
+--- a/extension/util/sdkcalls.h
++++ b/extension/util/sdkcalls.h
+@@ -115,6 +115,9 @@ private:
+ 	// https://github.com/ValveSoftware/source-sdk-2013/blob/master/mp/src/game/server/player.h#L577
+ 	//  void CBasePlayer::ProcessUsercmds( CUserCmd *cmds, int numcmds, int totalcmds, int dropped_packets, bool paused )
+ 	int m_offsetof_cbp_processusercmds;
++	// Size of the game's CUserCmd. Some mods append fields (ZPS 2.4 adds a CUtlVector, 0x54 bytes total);
++	// the game copies that many bytes from the command we pass, so the buffer must be at least this big.
++	std::size_t m_usercmd_size;
+ 	SourceMod::ICallWrapper* m_call_cbp_processusercmds;
+ 
+ 	// https://github.com/ValveSoftware/source-sdk-2013/blob/master/mp/src/game/server/baseanimating.h#L136

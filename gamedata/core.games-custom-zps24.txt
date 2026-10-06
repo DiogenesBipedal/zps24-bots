@@ -1,0 +1,23 @@
+/* ZPS 2.4 (Source 2007 / orangebox): CGlobalEntityList lookup, same as SourceMod's
+ * other Source 2007 mods in engine.ep2.txt. The 2.4 Linux server_i486.so exports gEntList. */
+"Games"
+{
+	"zps"
+	{
+		"Offsets"
+		{
+			"EntInfo"
+			{
+				"linux"		"4"
+			}
+		}
+		"Signatures"
+		{
+			"gEntList"
+			{
+				"library"	"server"
+				"linux"		"@gEntList"
+			}
+		}
+	}
+}

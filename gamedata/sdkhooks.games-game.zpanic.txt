@@ -1,0 +1,101 @@
+"Games"
+{
+	"zps"
+	{
+		"Offsets"
+		{
+			"GroundEntChanged"
+			{
+				"linux"		"170"
+			}
+			"OnTakeDamage_Alive"
+			{
+				"linux"		"250"
+			}
+			"Blocked"
+			{
+				"linux"		"99"
+			}
+			"Reload"
+			{
+				"linux"		"261"
+			}
+			"EndTouch"
+			{
+				"linux"		"97"
+			}
+			"FireBullets"
+			{
+				"linux"		"109"
+			}
+			"OnTakeDamage"
+			{
+				"linux"		"62"
+			}
+			"PreThink"
+			{
+				"linux"		"296"
+			}
+			"PostThink"
+			{
+				"linux"		"297"
+			}
+			"SetTransmit"
+			{
+				"linux"		"20"
+			}
+			"ShouldCollide"
+			{
+				"linux"		"16"
+			}
+			"Spawn"
+			{
+				"linux"		"22"
+			}
+			"StartTouch"
+			{
+				"linux"		"95"
+			}
+			"Think"
+			{
+				"linux"		"47"
+			}
+			"Touch"
+			{
+				"linux"		"96"
+			}
+			"TraceAttack"
+			{
+				"linux"		"60"
+			}
+			"Use"
+			{
+				"linux"		"94"
+			}
+			"VPhysicsUpdate"
+			{
+				"linux"		"150"
+			}
+			"Weapon_CanSwitchTo"
+			{
+				"linux"		"241"
+			}
+			"Weapon_CanUse"
+			{
+				"linux"		"235"
+			}
+			"Weapon_Drop"
+			{
+				"linux"		"238"
+			}
+			"Weapon_Equip"
+			{
+				"linux"		"236"
+			}
+			"Weapon_Switch"
+			{
+				"linux"		"239"
+			}
+		}
+	}
+}

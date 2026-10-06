@@ -1,0 +1,40 @@
+diff --git a/AMBuildScript b/AMBuildScript
+index 151df4c..a6d4f3e 100644
+--- a/AMBuildScript
++++ b/AMBuildScript
+@@ -119,7 +119,7 @@ class MMSConfig(object):
+         '-pipe',
+         '-fno-strict-aliasing',
+         '-Wall',
+-        '-Werror',
++        
+         '-Wno-uninitialized',
+         '-Wno-sign-compare',
+         '-Wno-unused',
+diff --git a/core/provider/console.cpp b/core/provider/console.cpp
+index d699cfb..502b449 100644
+--- a/core/provider/console.cpp
++++ b/core/provider/console.cpp
+@@ -40,6 +40,13 @@ SMConVarAccessor g_SMConVarAccessor;
+ 
+ bool SMConVarAccessor::RegisterConCommandBase(ConCommandBase *pCommand)
+ {
++#if SOURCE_ENGINE < SE_ALIENSWARM
++	/* Old engines (e.g. Source 2007 / ZPS 2.4) chain every registered command through
++	 * m_pNext. Clearing m_pNext on an already-registered command truncates the engine's
++	 * whole command list, so leave registered commands alone. */
++	if (pCommand->IsRegistered())
++		return true;
++#endif
+ 	m_RegisteredCommands.push_back(pCommand);
+ #if SOURCE_ENGINE < SE_ALIENSWARM
+ 	pCommand->m_pNext = NULL;
+@@ -52,6 +59,8 @@ bool SMConVarAccessor::RegisterConCommandBase(ConCommandBase *pCommand)
+ bool SMConVarAccessor::Register(ConCommandBase *pCommand)
+ {
+ #if SOURCE_ENGINE < SE_ALIENSWARM
++	if (pCommand->IsRegistered())
++		return true;
+ 	pCommand->m_pNext = NULL;
+ #endif
+ 	icvar->RegisterConCommand(pCommand);

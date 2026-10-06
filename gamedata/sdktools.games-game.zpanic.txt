@@ -1,0 +1,95 @@
+"Games"
+{
+	"zps"
+	{
+		"Offsets"
+		{
+			"GiveNamedItem"
+			{
+				"linux"		"359"
+			}
+			"RemovePlayerItem"
+			{
+				"linux"		"248"
+			}
+			"Weapon_GetSlot"
+			{
+				"linux"		"243"
+			}
+			"Ignite"
+			{
+				"linux"		"200"
+			}
+			"Extinguish"
+			{
+				"linux"		"204"
+			}
+			"Teleport"
+			{
+				"linux"		"105"
+			}
+			"CommitSuicide"
+			{
+				"linux"		"405"
+			}
+			"GetVelocity"
+			{
+				"linux"		"134"
+			}
+			"EyeAngles"
+			{
+				"linux"		"126"
+			}
+			"AcceptInput"
+			{
+				"linux"		"36"
+			}
+			"SetEntityModel"
+			{
+				"linux"		"25"
+			}
+			"WeaponEquip"
+			{
+				"linux"		"236"
+			}
+			"Activate"
+			{
+				"linux"		"33"
+			}
+			"PlayerRunCmd"
+			{
+				"linux"		"378"
+			}
+			"GetAttachment"
+			{
+				"linux"		"197"
+			}
+			"SetOwnerEntity"
+			{
+				"linux"		"17"
+			}
+			"GiveAmmo"
+			{
+				"linux"		"230"
+			}
+		}
+		"Signatures"
+		{
+			"FireOutput"
+			{
+				"library"		"server"
+				"linux"		"@_ZN17CBaseEntityOutput10FireOutputE9variant_tP11CBaseEntityS2_f"
+			}
+			"LookupAttachment"
+			{
+				"library"		"server"
+				"linux"		"@_ZN14CBaseAnimating16LookupAttachmentEPKc"
+			}
+		}
+		"Keys"
+		{
+			"GameRulesProxy"		"CGameMode_Manager"
+			"GameRulesDataTable"		"zps_gamerules_data"
+		}
+	}
+}

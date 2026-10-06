@@ -1,0 +1,4 @@
+*.smx
+*.pw
+__pycache__/
+build/
