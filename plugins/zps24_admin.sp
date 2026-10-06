@@ -49,6 +49,7 @@ public void OnPluginStart()
 	RegServerCmd("sm_zps24_humans", Cmd_Humans, "Print human players' teams and the Carrier");
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
 	CreateTimer(1.0, Timer_MarkVolunteers, _, TIMER_REPEAT);
+	CreateTimer(0.5, Timer_SpectatorHud, _, TIMER_REPEAT);
 
 	// ZPS announces the join window with TextMsg; track it so humans only ever join inside it.
 	UserMsg textmsg = GetUserMessageId("TextMsg");
@@ -154,6 +155,30 @@ Action Cmd_Humans(int args)
 	return Plugin_Handled;
 }
 
+// While an admin spectates a bot, show what the bot is doing: the same data as sm_botprobe.
+Action Timer_SpectatorHud(Handle timer)
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || IsFakeClient(client) || IsPlayerAlive(client) || !CheckCommandAccess(client, "sm_zpsmenu", ADMFLAG_GENERIC))
+			continue;
+		int target = GetEntPropEnt(client, Prop_Send, "m_hObserverTarget");
+		if (target <= 0 || target > MaxClients || !IsClientInGame(target) || !IsFakeClient(target))
+			continue;
+
+		char weapon[64] = "-", task[192] = "";
+		if (IsPlayerAlive(target))
+			GetClientWeapon(target, weapon, sizeof(weapon));
+		if (LibraryExists("navbot") && NavBotManager.IsNavBot(target))
+			NavBotBehaviorInterface.GetTaskDebugString(NavBotManager.GetNavBotByIndex(target).GetBehaviorInterface(), task, sizeof(task));
+		float pos[3];
+		GetClientAbsOrigin(target, pos);
+		PrintHintText(client, "%N  [%s]  hp %d  %s\n%s\npos %.0f %.0f %.0f",
+			target, GetClientTeam(target) == 2 ? "survivor" : "zombie", GetClientHealth(target), weapon, task, pos[0], pos[1], pos[2]);
+	}
+	return Plugin_Continue;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Grappling hook
 
@@ -240,6 +265,7 @@ void ShowMainMenu(int client)
 	m.AddItem("restart", "Restart map (new round)");
 	m.AddItem("ai", "Toggle survivor AI");
 	m.AddItem("me", "Me: noclip / god / weapons");
+	m.AddItem("spectate", "Spectate (shows bot info)");
 	m.Display(client, MENU_TIME_FOREVER);
 }
 
@@ -269,6 +295,11 @@ int Menu_Main(Menu menu, MenuAction action, int client, int item)
 		ShowMainMenu(client);
 	}
 	else if (StrEqual(info, "me"))          ShowMeMenu(client);
+	else if (StrEqual(info, "spectate"))
+	{
+		FakeClientCommand(client, "choose3");
+		PrintToChat(client, "[ZPS] Spectating: click to cycle players, the hint box shows the bot's current task");
+	}
 	return 0;
 }
 

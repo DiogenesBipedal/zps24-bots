@@ -172,7 +172,19 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	if (!g_target[client])
 		return Plugin_Continue;     // no survivors left to hunt
 
-	GetClientAbsOrigin(g_target[client], moveGoal);
+	// Aim the path at the survivor's own floor. The raw position snaps to whatever nav area is
+	// nearest, which for someone upstairs is often the floor right below them, so zombies would
+	// crowd underneath instead of taking the stairs or ladder. Prefer an area the survivor can see.
+	float target[3];
+	GetClientAbsOrigin(g_target[client], target);
+	float probe[3];
+	probe = target;
+	probe[2] += 16.0;
+	Address area = NavBotNavMesh.GetNearestNavArea(probe, 150.0, true, true);
+	if (area != Address_Null)
+		NavBotNavArea.GetClosestPointOnArea(area, target, moveGoal);
+	else
+		moveGoal = target;
 	routeType = NAVBOT_FASTEST_ROUTE;
 	return Plugin_Changed;
 }

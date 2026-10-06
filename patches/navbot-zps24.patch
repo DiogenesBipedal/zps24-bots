@@ -205,6 +205,132 @@ index e802007..514c76e 100644
  	}
  
  	for (int i = 2; i <= gpGlobals->maxClients; i++) 
+diff --git a/extension/navmesh/nav_generate.cpp b/extension/navmesh/nav_generate.cpp
+index 6380f2a..20066c3 100644
+--- a/extension/navmesh/nav_generate.cpp
++++ b/extension/navmesh/nav_generate.cpp
+@@ -34,6 +34,9 @@
+ 
+ #ifdef TERROR
+ #include "func_simpleladder.h"
++#include <string>
++#include <cstring>
++#include <cstdlib>
+ #endif
+ 
+ #undef min
+@@ -156,8 +159,6 @@ void CNavMesh::BuildLadders(void)
+ 	// remove any left-over ladders
+ 	DestroyLadders();
+ 
+-	// TO-DO: Add support for HL2 style ladders, will be used for Synergy and others HL2 based MP mods.
+-
+ 	auto func = [this](int index, edict_t* edict, CBaseEntity* entity) {
+ 		Vector mins;
+ 		Vector maxs;
+@@ -167,6 +168,90 @@ void CNavMesh::BuildLadders(void)
+ 	};
+ 
+ 	UtilHelpers::ForEachEntityOfClassname("func_simpleladder", func);
++
++	BuildInfoLadders();
++}
++
++//--------------------------------------------------------------------------------------------------------------
++/**
++ * HL2/Source 2007 style ladders. VBSP turns each func_ladder brush into ladder contents plus an
++ * "info_ladder" entity whose "mins.x" ... "maxs.z" keyvalues hold the ladder's bounds. At runtime
++ * info_ladder is a plain entity that keeps none of those values, so read them from the map's
++ * entity lump (e.g. ZPS 2.4's zpo_church_siege, whose upper floor is only reachable by ladder).
++ */
++void CNavMesh::BuildInfoLadders(void)
++{
++	const char* lump = engine->GetMapEntitiesString();
++
++	if (lump == nullptr)
++	{
++		return;
++	}
++
++	int count = 0;
++	const char* cursor = lump;
++
++	while ((cursor = std::strchr(cursor, '{')) != nullptr)
++	{
++		const char* end = std::strchr(cursor, '}');
++
++		if (end == nullptr)
++		{
++			break;
++		}
++
++		std::string block(cursor + 1, end);
++		cursor = end + 1;
++
++		if (block.find("\"info_ladder\"") == std::string::npos)
++		{
++			continue;
++		}
++
++		// Read "key" "value" pairs.
++		float values[6] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
++		int found = 0;
++		static const char* keys[6] = { "mins.x", "mins.y", "mins.z", "maxs.x", "maxs.y", "maxs.z" };
++		std::size_t pos = 0;
++
++		while (true)
++		{
++			std::size_t k0 = block.find('"', pos);
++			if (k0 == std::string::npos) { break; }
++			std::size_t k1 = block.find('"', k0 + 1);
++			if (k1 == std::string::npos) { break; }
++			std::size_t v0 = block.find('"', k1 + 1);
++			if (v0 == std::string::npos) { break; }
++			std::size_t v1 = block.find('"', v0 + 1);
++			if (v1 == std::string::npos) { break; }
++
++			std::string key = block.substr(k0 + 1, k1 - k0 - 1);
++			std::string value = block.substr(v0 + 1, v1 - v0 - 1);
++			pos = v1 + 1;
++
++			for (int i = 0; i < 6; i++)
++			{
++				if (key == keys[i])
++				{
++					values[i] = static_cast<float>(std::atof(value.c_str()));
++					found |= (1 << i);
++				}
++			}
++		}
++
++		if (found != 0x3F)
++		{
++			continue;
++		}
++
++		CreateLadder(Vector(values[0], values[1], values[2]), Vector(values[3], values[4], values[5]), 0.0f);
++		count++;
++	}
++
++	if (count > 0)
++	{
++		Msg("Built %d nav ladders from info_ladder entities.\n", count);
++	}
+ }
+ 
+ //--------------------------------------------------------------------------------------------------------------
+diff --git a/extension/navmesh/nav_mesh.h b/extension/navmesh/nav_mesh.h
+index 86939a8..9bace5c 100644
+--- a/extension/navmesh/nav_mesh.h
++++ b/extension/navmesh/nav_mesh.h
+@@ -756,6 +756,7 @@ public:
+ 	}
+ 
+ 	void CreateLadder( const Vector &mins, const Vector &maxs, float maxHeightAboveTopArea );
++	void BuildInfoLadders( void );		// HL2/Source 2007 info_ladder entities (bounds from the entity lump)
+ 	void CreateLadder( const Vector &top, const Vector &bottom, float width, const Vector2D &ladderDir, float maxHeightAboveTopArea );
+ 	void CreateUseableLadder(CBaseEntity* pLadder);
+ 	void MergeLadders(CNavLadder* bottom, CNavLadder* top);
 diff --git a/extension/util/sdkcalls.cpp b/extension/util/sdkcalls.cpp
 index 1891972..4b6f556 100644
 --- a/extension/util/sdkcalls.cpp
