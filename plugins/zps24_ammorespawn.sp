@@ -1,10 +1,13 @@
 // Respawns ammo pickups on chosen maps.
 //
 // ZPS 2.4 has no ammo respawn setting. At round start this plugin records every ammo item on the
-// map (including the ones random_ammo spawners created), then checks every few seconds which were
-// picked up and recreates each one at its original spot after a delay.
+// map (including the ones random_ammo spawners created), then checks every couple of seconds which
+// were picked up (ZPS hides them with EF_NODRAW rather than deleting them) and, after a delay,
+// replaces each with a fresh one at its original spot.
 #include <sourcemod>
 #include <sdktools>
+
+#define EF_NODRAW 32
 
 public Plugin myinfo =
 {
@@ -37,6 +40,24 @@ public void OnPluginStart()
 
 	g_spots = new ArrayList(sizeof(AmmoSpot));
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
+	RegServerCmd("sm_ammorespawn_status", Cmd_Status, "Show tracked ammo spots");
+}
+
+Action Cmd_Status(int args)
+{
+	int present = 0, hidden = 0, gone = 0, pending = 0;
+	for (int i = 0; i < g_spots.Length; i++)
+	{
+		AmmoSpot spot;
+		g_spots.GetArray(i, spot);
+		int ent = EntRefToEntIndex(spot.ref);
+		if (spot.respawnAt > 0.0) pending++;
+		if (ent == INVALID_ENT_REFERENCE) gone++;
+		else if (GetEntProp(ent, Prop_Send, "m_fEffects") & 32) hidden++;   // EF_NODRAW
+		else present++;
+	}
+	PrintToServer("[ammorespawn] active=%d tracked=%d present=%d hidden=%d gone=%d pending=%d", g_active, g_spots.Length, present, hidden, gone, pending);
+	return Plugin_Handled;
 }
 
 public void OnConfigsExecuted()   // runs every map, after cfg/sourcemod/*.cfg so the cvars are set
@@ -119,7 +140,9 @@ Action Timer_Check(Handle timer)
 
 		if (spot.respawnAt == 0.0)
 		{
-			if (EntRefToEntIndex(spot.ref) == INVALID_ENT_REFERENCE)
+			// ZPS 2.4 hides picked-up items (EF_NODRAW) instead of deleting them.
+			int cur = EntRefToEntIndex(spot.ref);
+			if (cur == INVALID_ENT_REFERENCE || (GetEntProp(cur, Prop_Send, "m_fEffects") & EF_NODRAW))
 			{
 				spot.respawnAt = now + g_delay.FloatValue;   // picked up: schedule the respawn
 				g_spots.SetArray(i, spot);
@@ -130,6 +153,9 @@ Action Timer_Check(Handle timer)
 		if (now < spot.respawnAt)
 			continue;
 
+		int leftover = EntRefToEntIndex(spot.ref);
+		if (leftover != INVALID_ENT_REFERENCE)
+			AcceptEntityInput(leftover, "Kill");      // the hidden, used-up item
 		int ent = CreateEntityByName(spot.classname);
 		if (ent == -1)
 			continue;
