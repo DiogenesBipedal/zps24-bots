@@ -24,12 +24,12 @@ Set these in `~/zps24-server/zps/cfg/server.cfg` (loaded on every map) or change
 | `sm_zps24ai_infinite_ammo` | 1 | Keep survivor bots' reserve ammo topped up |
 | `sm_zps24ai_equip_time` | 0 | Seconds bots spend collecting weapons and ammo at round start (only useful with `give_weapons 0`) |
 | `sm_zps24ai_engage_range` | 700 | Distance at which bots aim at and shoot visible zombies |
-| `sm_zps24ai_safe_distance` | 260 | Bots with guns back away from zombies closer than this |
+| `sm_zps24ai_safe_distance` | 260 | Bots stand and shoot until a zombie is this close, then fall back (upstairs when there is one) |
 | `sm_zps24ai_upper_height` | 80 | How much higher a spot must be to count as an upper floor, roof or balcony |
-| `sm_zps24ai_barricaders` | 0 | How many bots barricade at once. **Unfinished**: leave at 0 |
+| `sm_zps24ai_barricaders` | 2 | How many bots barricade the ground floor at once (0 = off) |
 | `sm_zps24ai_boards` | 3 | Boards per door or window when barricading |
 | `sm_zps24ai_holdout_radius` | 550 | Doors and windows within this distance of the hold-out get barricaded |
-| `sm_zps24ai_need_tool` | 1 | Barricaders must fetch a barricade hammer first |
+| `sm_zps24ai_need_tool` | 0 | 1 = barricaders fetch the barricade hammer (unfinished); 0 = they push furniture into doors and windows |
 | `sm_zps24ai_furniture` | 1 | Barricaders without a hammer push furniture into openings |
 | `sm_zps24ai_debug` | 0 | Log survivor AI decisions to the server console |
 

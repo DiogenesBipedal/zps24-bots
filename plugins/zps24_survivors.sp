@@ -56,6 +56,8 @@ int   g_badHoldoutCount;
 // Defend spots inside the hold-out: upper floors / roofs / balconies first, then corners.
 #define MAX_DEFEND 32
 int   g_defendCount;
+int   g_upperCount;                      // the first g_upperCount defend spots are upstairs
+float g_floorZ;                          // hold-out building's ground floor height
 float g_defendPos[MAX_DEFEND][3];
 
 // Per-bot state
@@ -94,10 +96,10 @@ public void OnPluginStart()
 	g_giveWeapons      = CreateConVar("sm_zps24ai_give_weapons", "1", "Give every survivor bot a random gun");
 	g_infiniteAmmo     = CreateConVar("sm_zps24ai_infinite_ammo", "1", "Keep survivor bots' reserve ammo topped up (no resupplying)");
 	g_engageRange      = CreateConVar("sm_zps24ai_engage_range", "700", "Survivor bots aim at and shoot visible zombies within this range");
-	g_needTool         = CreateConVar("sm_zps24ai_need_tool", "1", "Barricaders must fetch a weapon_barricade first");
+	g_needTool         = CreateConVar("sm_zps24ai_need_tool", "0", "Barricaders must fetch a weapon_barricade first (0 = they push furniture into the openings instead)");
 	g_radius           = CreateConVar("sm_zps24ai_holdout_radius", "550", "Doors/windows within this distance of the hold-out get barricaded");
 	g_safeDist         = CreateConVar("sm_zps24ai_safe_distance", "260", "Bots with guns back away from zombies closer than this");
-	g_barricaders      = CreateConVar("sm_zps24ai_barricaders", "0", "How many survivor bots barricade at once (barricading is unfinished; 0 = off)");
+	g_barricaders      = CreateConVar("sm_zps24ai_barricaders", "2", "How many survivor bots barricade the ground floor at once (0 = off)");
 	g_boardsPerOpening = CreateConVar("sm_zps24ai_boards", "3", "Boards to put on each door/window");
 	g_debug            = CreateConVar("sm_zps24ai_debug", "0", "Log AI decisions");
 	g_upperHeight      = CreateConVar("sm_zps24ai_upper_height", "80", "Nav areas this much above the hold-out floor count as upper floor / roof / balcony");
@@ -163,6 +165,7 @@ void CheckOverrun()
 	Debug("Overrun at %.0f %.0f %.0f (%d deaths, %d zombies inside): relocating", g_holdout[0], g_holdout[1], g_holdout[2], g_survivorDeaths, inside);
 	g_haveHoldout = false;
 	g_defendCount = 0;
+	g_upperCount = 0;
 }
 
 void ResetRound()
@@ -172,6 +175,7 @@ void ResetRound()
 	g_survivorDeaths = 0;
 	g_badHoldoutCount = 0;
 	g_defendCount = 0;
+	g_upperCount = 0;
 	g_roundStart = GetGameTime();
 	for (int i = 0; i <= MaxClients; i++)
 	{
@@ -367,6 +371,8 @@ void BuildDefendSpots(Address start)
 
 	// Pick the best MAX_DEFEND spots, at least 96 units apart so bots don't stack.
 	g_defendCount = 0;
+	g_upperCount = 0;
+	g_floorZ = floorZ;
 	bool used[512];
 	while (g_defendCount < MAX_DEFEND)
 	{
@@ -386,6 +392,8 @@ void BuildDefendSpots(Address start)
 		used[best] = true;
 		g_defendPos[g_defendCount] = centers[best];
 		g_defendCount++;
+		if (centers[best][2] - floorZ >= g_upperHeight.FloatValue)
+			g_upperCount++;             // spots are picked best-first, so upper ones come first
 	}
 	Debug("%d defend spots (best %.0f units above the ground floor)", g_defendCount, g_defendCount ? g_defendPos[0][2] - floorZ : 0.0);
 }
@@ -557,6 +565,8 @@ int ClaimOpening(int client)
 	{
 		if (g_openingDone[i] || (g_openingClaim[i] != 0 && g_openingClaim[i] != client))
 			continue;
+		if (g_defendCount > 0 && g_openingPos[i][2] - g_floorZ >= g_upperHeight.FloatValue)
+			continue;               // barricade the ground floor; upstairs is where we fight from
 		float d = GetVectorDistance(me, g_openingPos[i]);
 		if (d < bestDist) { bestDist = d; best = i; }
 	}
@@ -775,6 +785,8 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 
 	// 1. Get a barricade tool if we don't have one (dropping heavy items first).
 	int tool = FindOwnedWeapon(client, "weapon_barricade");
+	if (tool == -1 && !g_needTool.BoolValue && g_furniture.BoolValue)
+		return DoFurniture(client, bot, moveGoal);   // no hammer needed: push furniture into the opening
 	if (tool == -1 && g_needTool.BoolValue)
 	{
 		if (ShedWeight(client, bot))
@@ -1065,8 +1077,8 @@ bool TraceOnlyWorldAndZombies(int entity, int mask, int self)
 	return true;
 }
 
-// Nearest living zombie whose head or chest the bot can see (glass and other breakables between
-// count as "seeable": they break when shot).
+// Nearest living zombie whose head or chest the bot can see (window glass between counts as
+// "seeable": it breaks when shot).
 int NearestVisibleZombie(int client, float range, float &dist)
 {
 	float eye[3], target[3];
@@ -1089,7 +1101,10 @@ int NearestVisibleZombie(int client, float range, float &dist)
 		{
 			char cls[64];
 			GetEntityClassname(hit, cls, sizeof(cls));
-			visible = StrContains(cls, "breakable") != -1;   // window glass / boards
+			// Shoot through window glass only. Doors (func_breakable wood or metal, e.g. the church's
+			// main doors) and barricade boards would get shot to pieces.
+			visible = StrEqual(cls, "func_breakable_surf")
+				|| (StrEqual(cls, "func_breakable") && GetEntProp(hit, Prop_Data, "m_Material") == 0);
 		}
 		if (visible) { dist = d; best = i; }
 	}
@@ -1161,8 +1176,8 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	float zdist;
 	int zombie;
 	bool fighting = SelfDefence(client, bot, zombie, zdist);
-	if (fighting && zdist > 130.0)
-		return Hold(client);                // stand our ground and shoot
+	if (fighting && zdist > g_safeDist.FloatValue)
+		return Hold(client);                // stand our ground and shoot; back off once they get close
 	if (!fighting)
 		zombie = 0;
 	if (zombie && IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
@@ -1173,7 +1188,8 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		// step back; otherwise just step straight away.
 		int best = -1;
 		float bestScore = GetVectorDistance(me, them) + 150.0;
-		for (int i = 0; i < g_defendCount; i++)
+		int candidates = g_upperCount > 0 ? g_upperCount : g_defendCount;   // never fall back downstairs
+		for (int i = 0; i < candidates; i++)
 		{
 			float d = GetVectorDistance(g_defendPos[i], them);
 			if (d > bestScore && GetVectorDistance(g_defendPos[i], me) < 700.0) { bestScore = d; best = i; }
@@ -1217,7 +1233,9 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		bool calm = NearestZombie(client, 900.0, zd) == 0;
 		if (GetGameTime() >= g_defendSwitch[client] && calm)
 		{
-			int top = g_defendCount < 8 ? g_defendCount : 8;
+			// Upstairs whenever the building has an upper floor, roof or balcony.
+			int top = g_upperCount > 0 ? g_upperCount : g_defendCount;
+			if (top > 8) top = 8;
 			g_defendIdx[client] = GetRandomInt(0, top - 1);
 			g_defendSwitch[client] = GetGameTime() + GetRandomFloat(25.0, 45.0);
 		}

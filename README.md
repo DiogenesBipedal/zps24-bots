@@ -4,8 +4,9 @@ Bots for **Zombie Panic! Source 2.4**, the classic version Steam still offers as
 beta. Run a small Linux server on your own PC, fill it with bots, and play survivors vs. zombies
 against them from your normal ZPS 2.4 game.
 
-- **Survivor bots** take defensive spots (upper floors, corners), hold doors, fall back when
-  overrun and shoot the zombies they see.
+- **Survivor bots** head upstairs (upper floors, roofs, balconies), push furniture into the
+  ground-floor doors and windows, and shoot zombies from a safe distance, falling back when one
+  gets close.
 - **Zombie bots** hunt survivors down, follow them upstairs and smash through anything breakable.
 - Bots on both teams, including the Carrier. Up to 24 players and bots.
 - An **admin menu** (M) to add or remove bots, set their skill, change maps and spawn items, and a
@@ -15,8 +16,8 @@ against them from your normal ZPS 2.4 game.
 It's built on [NavBot](https://github.com/caxanga334/NavBot), with fixes that make modern
 Metamod:Source, SourceMod and NavBot run on the 2007-era ZPS 2.4 engine.
 
-> **Status: early (v0.1).** Bots play full rounds, but survivor bots don't build barricades yet and
-> some maps need tuning. See [Known issues](#known-issues).
+> **Status: early (v0.1).** Bots play full rounds, but they barricade with furniture only (no
+> hammer yet) and some maps need tuning. See [Known issues](#known-issues).
 
 ## What you need
 
@@ -141,8 +142,8 @@ Every setting and command is in [docs/SETTINGS.md](docs/SETTINGS.md).
 
 ## Known issues
 
-- Survivor bots don't build barricades yet (off by default; the game's weight limit stops armed
-  bots from carrying the hammer).
+- Survivor bots barricade with furniture only. The barricade hammer is off: the game's weight
+  limit stops armed bots from carrying it.
 - Bots can't climb the church map's ladders.
 - Bots occasionally post random text in chat.
 - The server sometimes crashes when it shuts down. It doesn't affect play.
