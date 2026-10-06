@@ -118,6 +118,11 @@ float CenterOf(int ent, float out[3])
 {
 	float origin[3], mins[3], maxs[3];
 	GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", origin);
+	if (!HasEntProp(ent, Prop_Send, "m_vecMins"))
+	{
+		out = origin;          // no collision bounds networked: use the origin
+		return 0.0;
+	}
 	GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
 	GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
 	for (int i = 0; i < 3; i++)

@@ -33,7 +33,7 @@ public Plugin myinfo =
 #define AMMO_BARRICADE 7          // ammo index of barricade boards (see GetAmmoDef in the manual)
 #define MAX_OPENINGS   64
 
-ConVar g_giveWeapons, g_infiniteAmmo, g_needTool;
+ConVar g_giveWeapons, g_infiniteAmmo, g_needTool, g_engageRange;
 ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOpening, g_debug, g_upperHeight, g_furniture;
 
 Handle g_canAttach;               // SDKCall: bool CWeapon_Barricade::CanAttachBarricade()
@@ -93,6 +93,7 @@ public void OnPluginStart()
 	g_equipTime        = CreateConVar("sm_zps24ai_equip_time", "0", "Seconds at round start bots spend collecting weapons/ammo before holding out (not needed with sm_zps24ai_give_weapons)");
 	g_giveWeapons      = CreateConVar("sm_zps24ai_give_weapons", "1", "Give every survivor bot a random gun");
 	g_infiniteAmmo     = CreateConVar("sm_zps24ai_infinite_ammo", "1", "Keep survivor bots' reserve ammo topped up (no resupplying)");
+	g_engageRange      = CreateConVar("sm_zps24ai_engage_range", "700", "Survivor bots aim at and shoot visible zombies within this range");
 	g_needTool         = CreateConVar("sm_zps24ai_need_tool", "1", "Barricaders must fetch a weapon_barricade first");
 	g_radius           = CreateConVar("sm_zps24ai_holdout_radius", "550", "Doors/windows within this distance of the hold-out get barricaded");
 	g_safeDist         = CreateConVar("sm_zps24ai_safe_distance", "260", "Bots with guns back away from zombies closer than this");
@@ -967,6 +968,9 @@ void HoldBestGun(int client, NavBot bot)
 {
 	if (g_job[client] == JOB_BARRICADE || GetGameTime() < g_nextUse[client])
 		return;
+	float zd;
+	if (NearestZombie(client, 600.0, zd) != 0)
+		return;   // don't fight NavBot's weapon choice mid-combat (constant switching = no shooting)
 	int best = BestGun(client);
 	if (best == -1 || GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") == best)
 		return;
@@ -1050,6 +1054,65 @@ void RefillAmmo(int client)
 }
 
 // ---------------------------------------------------------------------------------------------
+// Self-defence: aim at the nearest zombie in sight and shoot
+
+bool TraceOnlyWorldAndZombies(int entity, int mask, int self)
+{
+	if (entity == self)
+		return false;
+	if (entity >= 1 && entity <= MaxClients)
+		return GetClientTeam(entity) == TEAM_ZOMBIES;   // other survivors don't block the shot
+	return true;
+}
+
+// Nearest living zombie whose head or chest the bot can see (glass and other breakables between
+// count as "seeable": they break when shot).
+int NearestVisibleZombie(int client, float range, float &dist)
+{
+	float eye[3], target[3];
+	GetClientEyePosition(client, eye);
+	int best = 0;
+	dist = range;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+			continue;
+		GetClientEyePosition(i, target);
+		target[2] -= 12.0;
+		float d = GetVectorDistance(eye, target);
+		if (d >= dist)
+			continue;
+		TR_TraceRayFilter(eye, target, MASK_SHOT, RayType_EndPoint, TraceOnlyWorldAndZombies, client);
+		int hit = TR_GetEntityIndex();
+		bool visible = !TR_DidHit() || hit == i;
+		if (!visible && hit > MaxClients && IsValidEntity(hit))
+		{
+			char cls[64];
+			GetEntityClassname(hit, cls, sizeof(cls));
+			visible = StrContains(cls, "breakable") != -1;   // window glass / boards
+		}
+		if (visible) { dist = d; best = i; }
+	}
+	return best;
+}
+
+// Returns true while fighting (the caller then only moves if the zombie is right on top of us).
+bool SelfDefence(int client, NavBot bot, int &zombie, float &zdist)
+{
+	zombie = NearestVisibleZombie(client, g_engageRange.FloatValue, zdist);
+	if (!zombie)
+		return false;
+	int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtEntity(ctrl, zombie, LOOK_COMBAT, 0.4, "Shooting zombie");
+	if (IsGun(weapon) && GetEntProp(weapon, Prop_Send, "m_iClip1") <= 0)
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_RELOAD, 0.2);
+	else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl) && (IsGun(weapon) || zdist < 90.0))
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.1);
+	return true;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Main loop
 
 Action MoveTo(int client, float moveGoal[3])
@@ -1094,10 +1157,14 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	GetClientAbsOrigin(client, me);
 
 	// Keep a safe distance from zombies while holding a gun.
-	// Barricaders commit to the job and only back off from zombies right on top of them.
+	// Fight first: aim at and shoot the nearest zombie in sight. Only move if it's right on top of us.
 	float zdist;
-	float safe = g_job[client] == JOB_BARRICADE ? 120.0 : g_safeDist.FloatValue;
-	int zombie = NearestZombie(client, safe, zdist);
+	int zombie;
+	bool fighting = SelfDefence(client, bot, zombie, zdist);
+	if (fighting && zdist > 130.0)
+		return Hold(client);                // stand our ground and shoot
+	if (!fighting)
+		zombie = 0;
 	if (zombie && IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
 	{
 		float them[3];
