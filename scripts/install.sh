@@ -67,9 +67,11 @@ cp "$REPO/gamedata/sdktools.games-game.zpanic.txt" "$SMD/gamedata/sdktools.games
 cp "$REPO/gamedata/sdkhooks.games-game.zpanic.txt" "$SMD/gamedata/sdkhooks.games/game.zpanic.txt"
 mkdir -p "$SMD/gamedata/core.games/custom"
 cp "$REPO/gamedata/core.games-custom-zps24.txt"    "$SMD/gamedata/core.games/custom/zps24.txt"
+cp "$REPO/gamedata/zps24_ai.games.txt"             "$SMD/gamedata/"
+cp "$REPO/configs/navbot/weapons.cfg"              "$SMD/configs/navbot/zps/weapons.cfg"
 
 echo "== 8. Plugins and configs"
-for p in zps24_compat zps24_botprobe zps24_ammorespawn navbot_quota; do
+for p in zps24_compat zps24_botprobe zps24_ammorespawn zps24_survivors zps24_admin navbot_quota; do
 	"$SMD/scripting/spcomp" -i"$SPCOMP_INC" -i"$REPO/plugins" "$REPO/plugins/$p.sp" \
 		-o "$SMD/plugins/$p.smx" >/dev/null
 done
@@ -77,5 +79,8 @@ mkdir -p "$SERVER/zps/cfg/sourcemod"
 cp -n "$REPO/configs/plugin.navbot_quota.cfg" "$SERVER/zps/cfg/sourcemod/" 2>/dev/null || true
 cp -n "$REPO/configs/server.cfg" "$SERVER/zps/cfg/" 2>/dev/null || true
 cp -n "$REPO/configs/mapcycle_bots.txt" "$SERVER/zps/" 2>/dev/null || true
+# Make the local machine admin (LAN Steam IDs are all STEAM_ID_LAN, so match by IP).
+LANIP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+grep -q "\"!$LANIP\"" "$SMD/configs/admins_simple.ini" || printf '"!%s"\t"99:z"\n' "$LANIP" >> "$SMD/configs/admins_simple.ini"
 
 echo "Installed into $SERVER. Start it with scripts/zps24-server.sh start"

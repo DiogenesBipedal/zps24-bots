@@ -1,0 +1,17 @@
+/* Game functions used by plugins/zps24_survivors.sp (ZPS 2.4 Linux server_i486.so). */
+"Games"
+{
+	"zps"
+	{
+		"Signatures"
+		{
+			/* bool CWeapon_Barricade::CanAttachBarricade(): the game's own check that a board
+			 * fits where the owner is looking (traces from the eyes, checks the board's space). */
+			"CanAttachBarricade"
+			{
+				"library"	"server"
+				"linux"		"@_ZN17CWeapon_Barricade18CanAttachBarricadeEv"
+			}
+		}
+	}
+}

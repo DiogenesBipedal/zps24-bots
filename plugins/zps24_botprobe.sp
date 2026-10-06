@@ -2,6 +2,8 @@
 // Used to check from a terminal that NavBot bots spawn, move and fight on ZPS 2.4.
 #include <sourcemod>
 #include <sdktools>
+#undef REQUIRE_EXTENSIONS
+#include <navbot>
 
 public Plugin myinfo =
 {
@@ -83,7 +85,14 @@ void LogBots()
 		if (IsPlayerAlive(i))
 			GetClientWeapon(i, weapon, sizeof(weapon));
 
-		PrintToServer("[probe] %N team=%d alive=%d hp=%d pos=%.0f %.0f %.0f weapon=%s",
-			i, GetClientTeam(i), IsPlayerAlive(i), GetClientHealth(i), pos[0], pos[1], pos[2], weapon);
+		char task[256] = "";
+		if (LibraryExists("navbot") && NavBotManager.IsNavBot(i))
+		{
+			NavBot bot = NavBotManager.GetNavBotByIndex(i);
+			NavBotBehaviorInterface.GetTaskDebugString(bot.GetBehaviorInterface(), task, sizeof(task));
+		}
+
+		PrintToServer("[probe] %N team=%d alive=%d hp=%d pos=%.0f %.0f %.0f weapon=%s task=%s",
+			i, GetClientTeam(i), IsPlayerAlive(i), GetClientHealth(i), pos[0], pos[1], pos[2], weapon, task);
 	}
 }
