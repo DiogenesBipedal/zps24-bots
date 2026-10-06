@@ -8,13 +8,19 @@
 #   zps24-server.sh navgen        generate the bot nav mesh for the current map (once per map)
 #   zps24-server.sh log           follow the server console
 #
-# Join from the ZPS 2.4 client console with:  connect 127.0.0.1
+# Join from the ZPS 2.4 client console with:  connect <your LAN IP>   (start prints it)
+#
+# The server binds to this PC's LAN address, not 127.0.0.1: the 2007 engine treats every 127.x
+# address as its internal loopback and silently drops real UDP packets from it. sv_lan 1 keeps
+# internet players out; RCON is protected by a random password in ~/.config/zps24/rcon.pw.
 set -e
 SERVER="${ZPS24_SERVER:-$HOME/zps24-server}"
 CONF="$HOME/.config/zps24"
 LOG="$SERVER/server.log"
 HERE="$(dirname "$(readlink -f "$0")")"
 export ZPS24_RCON_PW_FILE="$CONF/rcon.pw"
+LANIP="${ZPS24_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')}"
+export ZPS24_RCON_HOST="$LANIP"
 
 rcon() { python3 "$HERE/rcon.py" "$@"; }
 running() { pgrep -x srcds_i486 >/dev/null; }
@@ -26,13 +32,13 @@ start)
 	[ -s "$CONF/rcon.pw" ] || { umask 077; python3 -c 'import secrets;print(secrets.token_hex(16))' > "$CONF/rcon.pw"; }
 	map="${2:-zps_deadend}"
 	cd "$SERVER"
-	# -insecure: SourceMod needs it. sv_lan 1: the ancient server can't do Steam auth, LAN mode skips it.
+	# -insecure: SourceMod needs it. sv_lan 1: LAN clients only, and no Steam auth.
 	LD_LIBRARY_PATH="$SERVER/bin:$SERVER" setsid ./srcds_i486 -game zps -console -insecure \
-		+ip 127.0.0.1 +sv_lan 1 +maxplayers 12 +rcon_password "$(cat "$CONF/rcon.pw")" +map "$map" \
+		+ip "$LANIP" +sv_lan 1 +maxplayers 12 +rcon_password "$(cat "$CONF/rcon.pw")" +map "$map" \
 		< /dev/null > "$LOG" 2>&1 &
 	printf 'Starting'
 	for i in $(seq 60); do sleep 2; printf '.'; rcon "echo ready" 2>/dev/null | grep -q ready && break; done
-	echo; running && echo "Server up on $map. In ZPS 2.4 open the console and type: connect 127.0.0.1" || { echo "Server failed; see $LOG"; exit 1; }
+	echo; running && echo "Server up on $map. In ZPS 2.4 open the console and type: connect $LANIP" || { echo "Server failed; see $LOG"; exit 1; }
 	;;
 stop)
 	running || { echo "Not running."; exit 0; }

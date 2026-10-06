@@ -42,7 +42,7 @@ newer engines. Things that "should" be compatible weren't, in ten separate ways.
 **The architecture we ended up with:**
 
 ```
- ZPS 2.4 client (Windows, under Proton)  ──connect 127.0.0.1──►  ZPS 2.4 dedicated server (Linux)
+ ZPS 2.4 client (Windows, under Proton)  ──connect <LAN IP>──►   ZPS 2.4 dedicated server (Linux)
                                                                     │
                                                                     ├─ engine_i486.so    (Valve, 2007)
                                                                     ├─ server_i486.so    (ZPS game code)
@@ -875,6 +875,40 @@ the server's own console or RCON, never by connected clients, so this is safe.
 **Lesson.** Silent failures usually mean an early `return`. Grep for the command's handler and
 read its first lines.
 
+### 7.11 The server that only talks to itself
+
+**Symptom.** Everything worked from scripts, but the real game couldn't join:
+"Connection failed after 4 retries."
+
+**Investigation.** First, take the client out of the picture. Send the server the standard
+query packet that server browsers use (A2S_INFO) from a few lines of Python:
+
+```python
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(b'\xff\xff\xff\xffTSource Engine Query\x00', ('127.0.0.1', 27015))
+print(s.recvfrom(4096))     # timed out: no reply
+```
+
+No reply, so it wasn't the client. Then a matrix of restarts, changing one thing at a time:
+
+| Setup | Reply on 127.0.0.1? | Reply on LAN IP? |
+|---|---|---|
+| Full setup, `+ip 127.0.0.1` | no | - |
+| No Metamod | no | - |
+| Original steamclient | no | - |
+| No `+ip` (binds the LAN address) | no | **yes** |
+| `+ip 127.0.0.2` | no | - |
+
+**Root cause.** The 2007 engine treats any 127.x address as its *internal* loopback (the
+in-memory path a listen server uses to talk to its own client), and drops real UDP packets
+that come from one. Our RCON tests worked because RCON uses TCP, a different code path.
+
+**Fix.** Bind to the LAN address and connect to that. `sv_lan 1` keeps internet clients out.
+
+**Lesson.** Test the thing users actually do (joining), not just what your scripts do (RCON).
+And when testing networking, build the smallest possible client yourself so you know which
+side is broken.
+
 ---
 
 ## 8. Building everything
@@ -946,8 +980,8 @@ s.sendall(pkt(3, 0, ''))                   # an empty "marker" packet: when its 
                                            # comes back, all output for the command has arrived
 ```
 
-Bind the server to `127.0.0.1` (`+ip 127.0.0.1`) so RCON isn't reachable from your network,
-and use a long random password.
+Use a long random password. (We first bound the server to `127.0.0.1` to keep RCON private,
+which broke joining; see section 7.11. It now binds to the LAN address, with `sv_lan 1`.)
 
 ### Seeing what bots do
 
@@ -1069,6 +1103,7 @@ Then `sm plugins load my` on the server, or restart the map.
 
 **Automation**
 20. Drive servers with RCON; it works anywhere, even under a debugger.
+20b. Test networking with a hand-made query packet before blaming the client.
 21. Write tiny probe plugins to observe game state from a terminal.
 22. Never `pkill -f` a pattern that appears in your own command line.
 

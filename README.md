@@ -19,11 +19,13 @@ scripts/zps24-server.sh start    # start the bot server (default map zps_deadend
 scripts/zps24-server.sh navgen   # first time on each map: generate the bot nav mesh (a few minutes)
 ```
 
-Then, in ZPS 2.4, open the console and type `connect 127.0.0.1`.
+Then, in ZPS 2.4, open the console and type `connect <your LAN IP>`. `start` prints the exact
+command. (The 2007 engine drops real network packets from 127.x addresses, so the server binds
+to your LAN address; `sv_lan 1` keeps internet players out.)
 
 | Command | What it does |
 |---|---|
-| `zps24-server.sh start [map]` | Start the server in the background (localhost only, LAN mode) |
+| `zps24-server.sh start [map]` | Start the server in the background (LAN mode, on this PC's LAN address) |
 | `zps24-server.sh stop` | Stop it |
 | `zps24-server.sh status` | List players and bots |
 | `zps24-server.sh cmd "changelevel zps_town"` | Run any server console command |
@@ -47,6 +49,7 @@ To change the bot count, edit `sm_navbot_quota_target` in `zps/cfg/sourcemod/plu
 | `JoinRound` parses every Steam ID as `STEAM_X:Y:Z`; a bot's `BOT` underflows a `memmove` | Give bots a well-formed fake ID (`SpoofBotNetworkID`) | NavBot patch |
 | The game uses `CreateEvent()` results without NULL checks; events nobody listens to crash it | Listen to every game event | `plugins/zps24_compat.sp` |
 | NavBot refuses nav commands on dedicated servers | Allow them; only the console/RCON can run them | NavBot patch |
+| The server never answers on `127.0.0.1` (the engine treats 127.x as internal loopback) | Bind to the LAN address | `zps24-server.sh` |
 
 ## Layout
 
