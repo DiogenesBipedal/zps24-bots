@@ -88,6 +88,20 @@ Stations and tracks are listed in `addons/sourcemod/configs/zps24_radio.cfg`, wh
 |---|---|---|
 | `sm_botprobe_interval` | 0 | Seconds between bot state logs in the server console (0 = off) |
 
+## Nav mesh tools (zps24_navdebug)
+
+Server console / RCON only (`zps24-server.sh cmd "..."`). For finding out why bots can't get
+somewhere on a map.
+
+| Command | What it does |
+|---|---|
+| `sm_navdump x1 y1 z1 x2 y2 z2` | Every nav area in the box: extent, neighbors (with height change and gap), ladder/jump links |
+| `sm_navreach x y z x1 y1 z1 x2 y2 z2` | Which areas in the box can be reached from the area at x y z |
+| `sm_floormap x1 y1 x2 y2 ztop step` | Floor heights on a grid (traces down from ztop): shows stairs, holes and ledges |
+| `sm_where <team>` | Positions of a team's living players (2 = survivors, 3 = zombies) |
+| `sm_navtp <client> x y z [1]` | Move a player there, optionally pinned in place (1) |
+| `sm_navseed x y z` | Add a generation seed. **Crashes NavBot when used outside generation; don't use** |
+
 ## Map rotation
 
 `server.cfg` points `mapcyclefile` at `mapcycle_bots.txt` (cabin and church) and sets

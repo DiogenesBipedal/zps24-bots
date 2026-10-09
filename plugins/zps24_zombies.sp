@@ -10,6 +10,7 @@
 #include <sdktools>
 #include <navbot>
 #include "include/zps24_unstick.inc"
+#include "include/zps24_stairs.inc"
 
 public Plugin myinfo =
 {
@@ -60,6 +61,7 @@ public void OnMapStart()
 			g_deadEndUntil[i][k] = 0.0;
 		Unstick_Reset(i);
 	}
+	Stairs_OnMapStart();
 	CreateTimer(0.5, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
@@ -351,6 +353,18 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	GetClientAbsOrigin(client, me);
 	GetClientAbsOrigin(g_target[client], target);
 	bool sees = CanSee(client, g_target[client]);
+
+	// Staircases the nav mesh doesn't cover (church tower): walk the hand-made route.
+	Action stairs;
+	if (Stairs_Update(client, bot, me, target, moveGoal, routeType, stairs))
+	{
+		g_blockedSince[client] = 0.0;
+		if (stairs == Plugin_Continue)
+			g_us_wantMove[client] = false;     // steering ourselves; don't let unstick detour us
+		else
+			Unstick_WantMove(client, me, moveGoal);
+		return stairs;
+	}
 
 	// Close and in plain view: go straight for them.
 	if (sees && GetVectorDistance(me, target) < 200.0)

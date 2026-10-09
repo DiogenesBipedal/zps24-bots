@@ -4,11 +4,16 @@ Where the project is (v0.1) and what's next. Nothing here has a date.
 
 ## Known issues
 
-- **Barricading is off.** Survivor bots should board up doors and windows with the barricade
-  hammer, using the game's own placement. What blocks it: ZPS 2.4's carry-weight limit stops
-  armed bots from picking up the hammer. The options are raising the limit (the weight is a float
-  at `CHuman+0x28`; the limit check is somewhere in the pickup path) or keeping barricaders
-  lightly armed.
+- **Barricading uses furniture only.** Survivor bots push furniture into the ground-floor doors
+  and windows. The barricade hammer is off: ZPS 2.4's carry-weight limit stops armed bots from
+  picking it up. The options are raising the limit (the weight is a float at `CHuman+0x28`; the
+  limit check is somewhere in the pickup path) or keeping barricaders lightly armed.
+- **Steep staircases.** NavBot's generator leaves out stairs steeper than about 45 degrees (it
+  samples every 25 units, and these rise more than a step per sample). The church tower's are
+  handled with hand-made stair routes (`plugins/include/zps24_stairs.inc`), for zombies so far;
+  survivors can't use the tower's upper floors yet. Other maps with steep stairs need their own
+  routes. Lowering `NavGen_StepSize` is not a fix: at 12.5 the church mesh came out in thousands
+  of disconnected pieces.
 - **Church ladders.** The nav mesh has ladders (from `info_ladder`), but bots fail the climb
   itself. NavBot's ladder movement needs looking at for HL2-style ladders.
 - **Chat gibberish.** Some bots occasionally put random text in chat without going through the

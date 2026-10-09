@@ -24,9 +24,10 @@ C in spirit, so everything C-like you know still applies; this manual explains t
 8. [Building everything](#8-building-everything)
 9. [Testing a game server without playing it](#9-testing-a-game-server-without-playing-it)
 10. [Writing SourcePawn plugins](#10-writing-sourcepawn-plugins)
-11. [The tricks, collected](#11-the-tricks-collected)
-12. [Exercises](#12-exercises)
-13. [Glossary](#13-glossary)
+11. [Teaching the bots to play](#11-teaching-the-bots-to-play)
+12. [The tricks, collected](#12-the-tricks-collected)
+13. [Exercises](#13-exercises)
+14. [Glossary](#14-glossary)
 
 ---
 
@@ -1074,7 +1075,174 @@ Then `sm plugins load my` on the server, or restart the map.
 
 ---
 
-## 11. The tricks, collected
+## 11. Teaching the bots to play
+
+Getting NavBot to *run* on 2.4 was the port. Getting the bots to *play* ZPS well is a different
+job: almost all of it lives in SourcePawn plugins, and most problems are found by watching
+bots from a terminal (section 9) and asking "what did it decide, and why?".
+
+### 11.1 Steering NavBot from a plugin
+
+NavBot runs its own behavior for each bot (roam, fight, collect items). A plugin can take over
+movement with a **scripted plugin command**:
+
+```c
+bot.SendScriptedPluginCommand(OnScriptedUpdate);   // once, from a timer
+
+Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeType)
+{
+	moveGoal = somewhere;              // where to walk; NavBot finds the path
+	routeType = NAVBOT_FASTEST_ROUTE;  // or NAVBOT_SAFEST_ROUTE
+	return Plugin_Changed;             // walk there
+}
+```
+
+NavBot calls the function every bot update. The return value decides what happens:
+
+| Return | Meaning |
+|---|---|
+| `Plugin_Changed` | Path to `moveGoal` and walk |
+| `Plugin_Continue` | Keep the task running, but don't path anywhere (stand, or steer the bot yourself) |
+| `Plugin_Stop` | End the task; NavBot's own behavior takes over |
+
+NavBot's combat code still aims and shoots on its own, so a plugin mostly decides *where to be*.
+`zps24_zombies.sp` and `zps24_survivors.sp` are built entirely on this.
+
+### 11.2 Zombies stuck in a corner behind a wall
+
+**Symptom.** At the end of a round, zombies crowded into a corner of a room, facing a wall. The
+last survivor was in the room on the other side.
+
+**Root cause.** Zombies walked to "the nav area nearest the survivor". The survivor was hiding
+where the nav mesh doesn't reach (a closet, on furniture), and the nearest area within reach
+was in the next room, through the wall. The zombies arrived there and, having "arrived",
+stopped.
+
+**Fix.** Only accept goals the survivor can be *seen* from:
+`NavBotNavArea.IsVisible(area, survivorEye)`. Search a wider box if nothing is close, then fall
+back to the last area the survivor stood on (`NavBotBasePlayer.GetLastKnownNavArea()`, which is
+the way they came in). And if a zombie reaches its goal but the survivor is still behind a wall
+after 2 seconds, mark that area as a dead end for 20 seconds and choose again.
+
+**Lesson.** "Nearest" is measured in a straight line; bots travel along paths. Whenever a goal is
+picked by distance, ask whether there's a wall in between.
+
+### 11.3 Survivors shooting their own door down
+
+**Symptom.** In the church, survivor bots destroyed the main door that was keeping zombies out.
+
+**Investigation.** The map's entity list (lump 0 of the BSP file, readable with a few lines of
+Python) shows the church doors are `func_breakable` with `material 1` (wood) and 2000 health.
+Doors aren't usually breakables, so that was the clue.
+
+**Root cause.** The survivor AI picked targets with a line-of-sight trace, and counted any
+entity whose class name contains "breakable" as see-through, meant for window glass. A
+zombie behind the door was "visible", so bots shot through the door until it broke.
+
+**Fix.** See-through means glass only: `func_breakable_surf`, or `func_breakable` whose
+`m_Material` is 0 (`matGlass`).
+
+**Lesson.** Class names describe how an entity *behaves* in code, not what it *is* in the map.
+Check the entity's properties (material, health) before deciding what it represents.
+
+### 11.4 Reacting to being hit
+
+Survivors used to keep shooting at whatever they could see, even while a zombie clawed them from
+behind. The game fires a `player_hurt` event (`userid`, `attacker`, `health`) for every hit,
+which SourceMod can listen to:
+
+```c
+HookEventEx("player_hurt", Event_PlayerHurt, EventHookMode_Post);
+```
+
+On a hit by a zombie the bot remembers the attacker for 3 seconds, turns to it
+(`AimAtEntity(..., LOOK_CRITICAL, ...)`), keeps firing, and backs off until it's outside
+`sm_zps24ai_safe_distance`. If an event ever arrives without an attacker, the nearest zombie in
+claw reach is blamed. That's a defensive fallback, because 2.4 might not fill every field.
+
+To back off without walking into walls, the bot tries seven directions away from the zombie
+(straight away, then 35, 70 and 90 degrees to either side). For each it traces a player-sized
+box to see how far it can actually walk, and picks the open one that ends farthest from the
+zombie.
+
+### 11.5 When the nav mesh is wrong: the church tower stairs
+
+**Symptom.** Zombies couldn't get up the church tower. They walked into walls under survivors
+standing on the floors above.
+
+**Investigation, step 1: look at the mesh.** Bots only know what the nav mesh tells them, so the
+first question is what the mesh contains. `zps24_navdebug.sp` adds console commands for that.
+`sm_navdump` lists every area in a box with its neighbors:
+
+```
+#49  (-1150 200 256)-(-925 400 256) -> S414(dz -36 gap 25)
+#125 (-1125 275 104)-(-925 375 104) -> S429 S168 W817 W818
+#414 (-1150 425 210)-(-1125 450 228) -> N49(dz 36 gap 25)
+```
+
+The tower has floors at z -47, 104 and 256. Each floor had areas, but nothing linked them: the
+staircases had no areas at all.
+
+**Step 2: look at the geometry.** `sm_floormap` traces down on a grid and prints floor heights.
+One row along a staircase, every 4 units:
+
+```
+94 94 94 85 85 76 76 76 67 67 58 58 58 49 49 40 40 40 31 31 31 21 21 11 11 11 1 1 -8 -8 -8 -18 -18 -28
+```
+
+Steps 9.5 units high and about 10 deep: easy for a player (the step height is 18), but steep,
+about 43 degrees.
+
+**Step 3: read the generator.** NavBot's generator (based on Valve's) walks the map in steps of
+`generation_step_size`, 25 units by default, and checks whether it can move from one sample
+point to the next. On these stairs 25 units of run is more than two steps, about 24 units of
+rise, so most samples look like a wall.
+
+**Attempt 1: sample more finely.** NavBot reads `NavGen_StepSize` from the game's gamedata keys.
+At 12.5 the generator did put more areas in the tower, but still none on the stairs, and
+`sm_navreach` (a breadth-first search over area connections) showed the whole church mesh had
+broken into thousands of disconnected pieces: from most places only 1 to 30 areas were
+reachable, against 359 before. Reverted.
+
+**Attempt 2: seed the stairs.** The generator grows outward from "walkable seed" points, and
+there's a native to add one (`NavBotNavMesh.AddWalkableSeed`). Adding a seed at runtime crashed
+the server within a second, in `CNavMesh::Update()` (backtrace from `ZPS24_GDB=1`). Dropped.
+
+**Attempt 3: connect the floors directly.** `NavBotNavArea.ConnectToAdjacent()` links two areas.
+But the bot's path cost function (`bot_pathcosts.cpp`) refuses any normal link that climbs more
+than a step or a jump, and the floors are 150 units apart.
+
+**Fix: hand-made stair routes.** `NavBotMovementInterface.MoveTowards(movement, point, weight)`
+makes a bot walk toward a point with no pathfinding at all. `plugins/include/zps24_stairs.inc`
+describes each staircase as a list of points, from an approach point on the lower floor's mesh,
+up the steps, to an exit point on the upper floor's mesh. A zombie that needs another floor of
+the tower:
+
+1. paths normally to the near end of the right staircase (`Plugin_Changed`);
+2. is then steered point to point with `MoveTowards`, returning `Plugin_Continue` so NavBot
+   doesn't try to path;
+3. leaves the route at the far end, back on the mesh, and paths normally again.
+
+Going down walks the same route backwards. If a bot makes no progress for 3 seconds (someone in
+the way), it drops the route and retries.
+
+**Testing it without playing.** `sm_navtp` pins a survivor bot on the third floor,
+`sm_zps24zombies_force_target` makes every zombie hunt it, and `sm_where 3` prints zombie
+positions every 5 seconds. Before: zombies at the outside wall. After: all 8 zombies on the third
+floor within 75 seconds, and the survivor dead 4 seconds after being unpinned.
+
+**Lessons.**
+- Check the data before the code: one dump of the nav mesh showed the stairs were missing.
+- A config change can break things far from where you look. Measure the whole result (here,
+  reachability), not only the spot you were fixing.
+- When a system can't be made to understand something, work around it at a higher level. Bots
+  don't need nav areas on the stairs if a plugin can walk them up.
+- Debug output can lie too: an early version of the test script read the wrong columns and
+  reported zero zombies in the tower. Sanity-check your measurements.
+
+---
+
+## 12. The tricks, collected
 
 **Reverse engineering**
 1. `file` first. "Not stripped" means you get names for everything.
@@ -1107,9 +1275,17 @@ Then `sm plugins load my` on the server, or restart the map.
 21. Write tiny probe plugins to observe game state from a terminal.
 22. Never `pkill -f` a pattern that appears in your own command line.
 
+**Bot behavior**
+23. Pick goals by what the bot can reach or see, not by straight-line distance.
+24. Check an entity's properties (material, health, flags), not just its class name.
+25. When bots can't get somewhere, dump the nav mesh before touching code.
+26. After changing generation settings, measure reachability across the whole map.
+27. If the pathfinder can't express a route, steer the bot yourself (`MoveTowards`) and hand it
+    back to the pathfinder at the end.
+
 ---
 
-## 12. Exercises
+## 13. Exercises
 
 Each builds on something in this repo.
 
@@ -1128,7 +1304,7 @@ Each builds on something in this repo.
 
 ---
 
-## 13. Glossary
+## 14. Glossary
 
 | Term | Meaning |
 |---|---|
@@ -1146,7 +1322,12 @@ Each builds on something in this repo.
 | Itanium ABI | The C++ ABI used by GCC and Clang on Linux. |
 | Listen server | A server hosted from inside the game, as opposed to a dedicated server. |
 | Mangling | Encoding C++ names and types into symbol names. |
+| Dead end | Here: a goal area a zombie reached without being able to see its target; avoided for 20 s. |
+| Hold-out | The building survivor bots choose to defend. |
+| `MoveTowards` | NavBot native that walks a bot straight at a point, with no pathfinding. |
 | Nav mesh | A map of walkable areas that bots use to find paths. |
+| Scripted plugin command | NavBot task that calls a plugin function every update to get the bot's move goal. |
+| Stair route | A hand-made list of points that walks bots up a staircase the nav mesh doesn't cover. |
 | Offset | Here: a vtable slot number. |
 | Relocation | A note telling the loader to patch an address at load time. |
 | RCON | Source's remote console protocol over TCP. |
