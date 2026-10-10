@@ -126,6 +126,8 @@ void Learned_Load()
 			kv.GetVector("out", g_ln_entryOut[e]);
 			kv.GetVector("in", g_ln_entryIn[e]);
 			g_ln_entryUses[e] = kv.GetNum("uses", 1);
+			if (GetVectorDistance(g_ln_entryOut[e], g_ln_entryIn[e]) < 12.0)
+				g_ln_entryCount--;               // no direction to it: skip
 		} while (kv.GotoNextKey());
 	}
 	kv.Rewind();

@@ -242,6 +242,8 @@ bool IsTeacher(int client)
 
 void RecordEntry(int client, const float out[3], const float inside[3])
 {
+	if (GetVectorDistance(out, inside) < 12.0)
+		return;                              // standing at the edge of a roof: no way through to learn
 	for (int e = 0; e < g_ln_entryCount; e++)
 		if (GetVectorDistance(g_ln_entryIn[e], inside) < 80.0)
 		{
