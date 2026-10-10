@@ -846,6 +846,33 @@ bool TraceWorldOnly(int entity, int mask)
 	return entity == 0;
 }
 
+Address AreaOnSide(const float center[3], const float n[3], float floorZ, float sign)
+{
+	for (float dist = 32.0; dist <= 128.0; dist += 16.0)
+	{
+		float p[3], q[3];
+		p[0] = center[0] + n[0] * dist * sign;
+		p[1] = center[1] + n[1] * dist * sign;
+		p[2] = floorZ;
+		Address area = NavBotNavMesh.GetNearestNavArea(p, 40.0, false, true);
+		if (area == Address_Null)
+			continue;
+		NavBotNavArea.GetClosestPointOnArea(area, p, q);
+		// Must really be on this side of the door, and not past a wall.
+		float rel = (q[0] - center[0]) * n[0] * sign + (q[1] - center[1]) * n[1] * sign;
+		if (rel <= 0.0)
+			continue;
+		q[2] += 16.0;
+		float from[3];
+		from = center;
+		from[2] = floorZ;
+		TR_TraceRayFilter(from, q, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
+		if (!TR_DidHit())
+			return area;
+	}
+	return Address_Null;
+}
+
 // Rooms whose door was closed while the nav mesh was generated come out as islands: their
 // areas aren't connected to the rest, so a zombie hunting someone inside can't find a path and
 // walks straight at the wall in between. Connect the areas on both sides of every door.
@@ -878,8 +905,10 @@ int LinkDoors(bool verbose)
 			TR_TraceRayFilter(a, b, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
 			if (TR_DidHit())
 				continue;
-			Address areaA = NavBotNavMesh.GetNearestNavArea(a, 64.0, false, true);
-			Address areaB = NavBotNavMesh.GetNearestNavArea(b, 64.0, false, true);
+			// The nearest area on each side, looking up to 128 units out (a small room's area can
+			// start well back from the door).
+			Address areaA = AreaOnSide(center, n, floorZ, 1.0);
+			Address areaB = AreaOnSide(center, n, floorZ, -1.0);
 			if (areaA == Address_Null || areaB == Address_Null || areaA == areaB)
 				continue;
 			float ca[3], cb[3];
