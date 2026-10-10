@@ -717,8 +717,8 @@ bool IsFurniture(int ent)
 {
 	char cls[64];
 	GetEntityClassname(ent, cls, sizeof(cls));
-	if (StrContains(cls, "prop_physics") == -1)
-		return false;
+	if (StrContains(cls, "prop_physics") == -1 && StrContains(cls, "func_physbox") == -1)
+		return false;                    // furniture, and planks across doorways
 	int ref = EntIndexToEntRef(ent);
 	for (int i = 0; i < g_fixedCount; i++)
 		if (g_fixed[i] == ref)
@@ -1219,6 +1219,62 @@ int LinkDoors(bool verbose)
 				linked++;
 			if (verbose)
 				PrintToServer("[doorlinks] door %d (%s) at %.0f %.0f %.0f: areas #%d <-> #%d %s", ent, classes[c], center[0], center[1], center[2],
+					NavBotNavArea.GetID(areaA), NavBotNavArea.GetID(areaB), made ? "linked" : "could not link");
+		}
+	}
+	// Doorways with a plank across them (func_physbox): the generator saw a wall. Link them too;
+	// zombies knock the plank off when they get there (it counts as furniture).
+	static const char planks[][] = { "func_physbox", "func_physbox_multiplayer" };
+	for (int c = 0; c < sizeof(planks); c++)
+	{
+		int ent = -1;
+		while ((ent = FindEntityByClassname(ent, planks[c])) != -1)
+		{
+			if (!HasEntProp(ent, Prop_Send, "m_vecMins"))
+				continue;
+			float center[3], mins[3], maxs[3];
+			CenterOf(ent, center);
+			GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+			GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+			float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1];
+			float n[3];
+			n[0] = sx < sy ? 1.0 : 0.0;
+			n[1] = sx < sy ? 0.0 : 1.0;
+			// The floor under the plank.
+			float down[3];
+			down = center;
+			down[2] -= 200.0;
+			TR_TraceRayFilter(center, down, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
+			if (!TR_DidHit())
+				continue;
+			float floorPos[3];
+			TR_GetEndPosition(floorPos);
+			float floorZ = floorPos[2] + 16.0;
+			float a[3], b[3];
+			for (int i = 0; i < 2; i++) { a[i] = center[i] + n[i] * 40.0; b[i] = center[i] - n[i] * 40.0; }
+			a[2] = floorZ; b[2] = floorZ;
+			TR_TraceRayFilter(a, b, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
+			if (TR_DidHit())
+				continue;                    // a plank against a wall, not across an opening
+			Address areaA = AreaOnSide(center, n, floorZ, 1.0);
+			Address areaB = AreaOnSide(center, n, floorZ, -1.0);
+			if (areaA == Address_Null || areaB == Address_Null || areaA == areaB)
+				continue;
+			float ca[3], cb[3];
+			NavBotNavArea.GetClosestPointOnArea(areaA, a, ca);
+			NavBotNavArea.GetClosestPointOnArea(areaB, b, cb);
+			if (FloatAbs(ca[2] - cb[2]) > 18.0)
+				continue;
+			bool ab = NavBotNavArea.IsConnectedToAny(areaA, areaB), ba = NavBotNavArea.IsConnectedToAny(areaB, areaA);
+			if (ab && ba)
+				continue;
+			bool made = false;
+			if (!ab) made = NavBotNavArea.ConnectToAdjacent(areaA, areaB) || made;
+			if (!ba) made = NavBotNavArea.ConnectToAdjacent(areaB, areaA) || made;
+			if (made)
+				linked++;
+			if (verbose)
+				PrintToServer("[doorlinks] planked doorway %d at %.0f %.0f %.0f: areas #%d <-> #%d %s", ent, center[0], center[1], center[2],
 					NavBotNavArea.GetID(areaA), NavBotNavArea.GetID(areaB), made ? "linked" : "could not link");
 		}
 	}

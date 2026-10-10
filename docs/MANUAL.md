@@ -1475,6 +1475,12 @@ The file is a KeyValues text file per map in `data/zps24_learn/`, readable and e
   - *Always go in.* An entrance is used whenever the zombie is outside and its survivor inside,
     even if it can see them through the glass (rushing at them sent the pathfinder round to a
     door).
+- **Planked doorways.** Cabin's ammo room was a nav island: a window on one side and a doorway
+  with a plank across it (`func_physbox`) on the other. The generator treats the plank as a
+  wall. The door linker now also handles planks: if the floor under a plank is clear of world
+  geometry on both sides, the areas either side are connected. Planks count as furniture for
+  zombies, so they get shoved, or smashed if they won't move. On cabin this linked 6 planked
+  doorways, and the ammo room went from 2 reachable areas to the whole map.
 - **Survivors on ledges.** A survivor on a narrow ledge in the cabin's upstairs bedroom, 46
   units above the floor, made zombies grind into the wall. In the nav mesh that ledge only has
   connections leading off it, so a path can never end there. Goal areas must now be
