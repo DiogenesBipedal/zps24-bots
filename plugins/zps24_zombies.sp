@@ -578,10 +578,10 @@ int UpdateBreach(int client, NavBot bot, const float me[3], int target, float mo
 		{
 			// Windows: swing. Planks and bars: swing and shove in turn, with the push assist,
 			// away from us (into the room / off the door).
-			bool shove = g_brKind[k] != BR_WINDOW && RoundToFloor(GetGameTime()) % 2 == 0;
+			bool shove = g_brKind[k] != BR_WINDOW && !IsWooden(blocker) && RoundToFloor(GetGameTime()) % 2 == 0;
 			NavBotPlayerControllerInterface.PressButtonByID(ctrl, shove ? NAVBOT_BUTTON_ATTACKSEC : NAVBOT_BUTTON_ATTACKPRIM, 0.2);
 			g_nextShove[client] = GetGameTime() + 0.7;
-			if (shove && blocker != -1)
+			if ((shove || IsWooden(blocker)) && blocker != -1)   // a hit knocks wood off too
 			{
 				float dir[3];
 				SubtractVectors(g_brSide[k][to], g_brSide[k][from], dir);
@@ -724,7 +724,7 @@ int UpdateUnbar(int client, NavBot bot, const float me[3], float moveGoal[3])
 	if (GetGameTime() >= g_nextShove[client] && NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
 	{
 		// Alternate swing (breaks wooden planks) and shove (moves padlocks and furniture).
-		bool shove = RoundToFloor(GetGameTime()) % 2 == 0;
+		bool shove = !IsWooden(bar) && RoundToFloor(GetGameTime()) % 2 == 0;
 		NavBotPlayerControllerInterface.PressButtonByID(ctrl, shove ? NAVBOT_BUTTON_ATTACKSEC : NAVBOT_BUTTON_ATTACKPRIM, 0.2);
 		g_nextShove[client] = GetGameTime() + 0.7;
 		float dir[3];
@@ -962,12 +962,34 @@ int FindObstacle(int client)
 	return best;
 }
 
+// Wooden barricades: planks (func_physbox), boards survivors nailed up (barricade models),
+// wooden breakables. Broken with normal hits (left click), never shoved.
+bool IsWooden(int ent)
+{
+	if (ent <= MaxClients || !IsValidEntity(ent))
+		return false;
+	char cls[64];
+	GetEntityClassname(ent, cls, sizeof(cls));
+	if (StrContains(cls, "func_physbox") != -1)
+		return true;
+	if (StrEqual(cls, "func_breakable") && GetEntProp(ent, Prop_Data, "m_Material") == 1)
+		return true;
+	if (HasEntProp(ent, Prop_Data, "m_ModelName"))
+	{
+		char model[128];
+		GetEntPropString(ent, Prop_Data, "m_ModelName", model, sizeof(model));
+		if (StrContains(model, "barricade", false) != -1 || StrContains(model, "wood", false) != -1 || StrContains(model, "plank", false) != -1)
+			return true;
+	}
+	return false;
+}
+
 bool IsFurniture(int ent)
 {
 	char cls[64];
 	GetEntityClassname(ent, cls, sizeof(cls));
-	if (StrContains(cls, "prop_physics") == -1 && StrContains(cls, "func_physbox") == -1)
-		return false;                    // furniture, and planks across doorways
+	if (StrContains(cls, "prop_physics") == -1 || IsWooden(ent))
+		return false;                    // only movable furniture gets shoved; wood gets smashed
 	int ref = EntIndexToEntRef(ent);
 	for (int i = 0; i < g_fixedCount; i++)
 		if (g_fixed[i] == ref)
