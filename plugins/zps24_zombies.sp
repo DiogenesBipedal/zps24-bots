@@ -1265,6 +1265,17 @@ int LinkDoors(bool verbose)
 			NavBotNavArea.GetClosestPointOnArea(areaB, b, cb);
 			if (FloatAbs(ca[2] - cb[2]) > 18.0)
 				continue;
+			// A doorway's plank sits over the floor people walk on. Under a boarded-up window the
+			// trace down stops on the sill, well above the floors either side: not a way through.
+			if (floorPos[2] > (ca[2] > cb[2] ? ca[2] : cb[2]) + 12.0)
+				continue;
+			// And there must be headroom to walk through: clear at chest height too.
+			float a2[3], b2[3];
+			a2 = a; b2 = b;
+			a2[2] = floorPos[2] + 56.0; b2[2] = floorPos[2] + 56.0;
+			TR_TraceRayFilter(a2, b2, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
+			if (TR_DidHit())
+				continue;
 			bool ab = NavBotNavArea.IsConnectedToAny(areaA, areaB), ba = NavBotNavArea.IsConnectedToAny(areaB, areaA);
 			if (ab && ba)
 				continue;
