@@ -4,14 +4,16 @@
 //
 //   1. Gear up    (first sm_zps24ai_equip_time seconds of a round): NavBot runs on its own and
 //                 collects weapons and ammo (with E).
-//   2. Hold out   The team picks one building (the densest cluster of doors and windows) and goes
-//                 there. Up to sm_zps24ai_barricaders bots fetch a weapon_barricade and board up the
-//                 building's doors and windows, asking the game's own CWeapon_Barricade::
-//                 CanAttachBarricade() whether a board fits before hammering.
-//   3. Defend     Everyone else holds the spot; NavBot's combat code does the shooting.
+//   2. Hold out   Every bot defends the house it spawned in (its "home": the doors and windows
+//                 around its spawn). Up to sm_zps24ai_barricaders bots per house block its
+//                 ground-floor doors, shoving furniture into them with bare hands (H, right
+//                 click), or nailing boards with the barricade tool (sm_zps24ai_need_tool 1).
+//   3. Defend     Everyone else holds a spot upstairs or in a corner, away from the windows,
+//                 watching the doors and windows, and shoots what comes in.
 //
-// Always: a bot holding a gun backs away from zombies closer than sm_zps24ai_safe_distance, opens
-// closed doors in front of it with E, and gets released to restock when it runs out of ammo.
+// Always: bots never break windows, doors or barricades (no shooting through them, no smashing
+// them on the way); a bot holding a gun backs away from zombies closer than
+// sm_zps24ai_safe_distance; furniture in the way gets shoved aside; closed doors get opened with E.
 //
 // Bots are steered through NavBot's scripted plugin command: OnScriptedUpdate() runs every bot
 // update and returns where the bot should walk.
@@ -19,6 +21,7 @@
 #include <sdktools>
 #include <navbot>
 #include "include/zps24_unstick.inc"
+#include "include/zps24_stairs.inc"
 
 public Plugin myinfo =
 {
@@ -34,31 +37,61 @@ public Plugin myinfo =
 #define MAX_OPENINGS   64
 
 ConVar g_giveWeapons, g_infiniteAmmo, g_needTool, g_engageRange;
-ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOpening, g_debug, g_upperHeight, g_furniture;
+ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOpening, g_debug, g_upperHeight, g_furniture, g_learnedStyle;
+
+// Distances to fight at: the settings, or what the main player does (zps24_learn).
+float EngageRange()
+{
+	float r = g_engageRange.FloatValue;
+	if (g_learnedStyle.BoolValue && g_ln_shootN >= 20)
+		r = ClampF(Learned_ShootDist(r) * 1.15, 250.0, 1200.0);
+	return r;
+}
+
+float SafeDist()
+{
+	float d = g_safeDist.FloatValue;
+	if (g_learnedStyle.BoolValue && g_ln_retreatN >= 10)
+		d = ClampF(Learned_RetreatDist(d), 120.0, 500.0);
+	return d;
+}
+
+float ClampF(float v, float lo, float hi)
+{
+	return v < lo ? lo : v > hi ? hi : v;
+}
 
 Handle g_canAttach;               // SDKCall: bool CWeapon_Barricade::CanAttachBarricade()
 
-// The team's hold-out and the openings (doors/windows) around it.
-bool  g_haveHoldout;
-float g_holdout[3];
+// Homes: the buildings the bots hold out in. Every bot defends the house it spawned in, so bots
+// spawning in different houses defend different houses.
+#define MAX_HOMES  4
+#define MAX_DEFEND 32
+int   g_homeCount;
+bool  g_homeValid[MAX_HOMES];
+float g_homePos[MAX_HOMES][3];
+float g_homeChosenAt[MAX_HOMES];
+int   g_homeDeaths[MAX_HOMES];           // survivor bot deaths there since it was chosen
+// Defend spots inside each home: upper floors / roofs / balconies first, then corners, never
+// next to a window.
+int   g_defendCount[MAX_HOMES];
+int   g_upperCount[MAX_HOMES];           // the first g_upperCount defend spots are upstairs
+float g_floorZ[MAX_HOMES];               // the home's ground floor height
+float g_defendPos[MAX_HOMES][MAX_DEFEND][3];
+
+// Doors and windows of all homes.
 int   g_openingCount;
 float g_openingPos[MAX_OPENINGS][3];
 float g_openingInside[MAX_OPENINGS][3];  // unit vector pointing from the opening into the building
-int   g_openingBoards[MAX_OPENINGS];     // boards successfully placed
+int   g_openingEnt[MAX_OPENINGS];        // the door/window entity
+int   g_openingHome[MAX_OPENINGS];       // home it belongs to (-1 = home abandoned)
+bool  g_openingWindow[MAX_OPENINGS];     // window (kept clear of furniture and bots) or door
+int   g_openingBoards[MAX_OPENINGS];     // furniture/boards successfully placed
 int   g_openingClaim[MAX_OPENINGS];      // client working on it (0 = nobody)
 bool  g_openingDone[MAX_OPENINGS];
 float g_roundStart;
-int   g_survivorDeaths;                  // survivor bot deaths since the hold-out was chosen
-float g_holdoutChosenAt;
-float g_badHoldout[8][3];                // hold-outs we were overrun at this round
+float g_badHoldout[8][3];                // homes we were overrun at this round
 int   g_badHoldoutCount;
-
-// Defend spots inside the hold-out: upper floors / roofs / balconies first, then corners.
-#define MAX_DEFEND 32
-int   g_defendCount;
-int   g_upperCount;                      // the first g_upperCount defend spots are upstairs
-float g_floorZ;                          // hold-out building's ground floor height
-float g_defendPos[MAX_DEFEND][3];
 
 // Per-bot state
 enum BotJob { JOB_NONE, JOB_BARRICADE }
@@ -74,7 +107,6 @@ int    g_modeWorks = 0;                  // hold attack through the animation: v
 float  g_hammerAim[MAXPLAYERS + 1][3];
 int    g_hammerBoardsBefore[MAXPLAYERS + 1];
 int    g_carryProp[MAXPLAYERS + 1];      // furniture being carried (entity reference) or INVALID_ENT_REFERENCE
-float  g_carryStarted[MAXPLAYERS + 1];
 float  g_nextUse[MAXPLAYERS + 1];
 float  g_restockUntil[MAXPLAYERS + 1];
 bool   g_scripted[MAXPLAYERS + 1];
@@ -86,7 +118,20 @@ int    g_defendIdx[MAXPLAYERS + 1];      // which defend spot the bot holds
 float  g_defendSwitch[MAXPLAYERS + 1];   // when to move to another spot
 int    g_hurtBy[MAXPLAYERS + 1];         // zombie that last hit this bot (client index)
 float  g_hurtUntil[MAXPLAYERS + 1];      // react to that hit until then
-float  g_lookAround[MAXPLAYERS + 1];     // next time to turn and watch another door/window       // gun spawned in front of the bot, waiting to be picked up
+float  g_lookAround[MAXPLAYERS + 1];     // next time to turn and watch another door/window
+int    g_home[MAXPLAYERS + 1] = { -1, ... };   // home the bot defends
+float  g_spawnPos[MAXPLAYERS + 1][3];
+bool   g_haveSpawn[MAXPLAYERS + 1];
+float  g_handsUntil[MAXPLAYERS + 1];     // holding bare hands to shove furniture: don't switch back yet
+int    g_shoveProp[MAXPLAYERS + 1];      // furniture in the way, being shoved aside (entity reference)
+float  g_shoveUntil[MAXPLAYERS + 1];
+float  g_shoveFrom[MAXPLAYERS + 1][3];   // where that furniture was when the bot started shoving it
+int    g_pushes[MAXPLAYERS + 1];         // shoves at the current piece of furniture
+float  g_pushBest[MAXPLAYERS + 1];       // its closest distance to the door so far
+int    g_pushStuck[MAXPLAYERS + 1];      // shoves without getting it closer
+int    g_badProp[16];                    // furniture that wouldn't budge (entity references)
+int    g_badPropCount;
+char   g_state[MAXPLAYERS + 1][48];      // last decision of the scripted update, for sm_zps24ai_bots
 
 static const char g_guns[][] = { "weapon_glock", "weapon_glock18c", "weapon_usp", "weapon_ppk", "weapon_revolver",
 	"weapon_870", "weapon_supershorty", "weapon_winchester", "weapon_ak47", "weapon_m4", "weapon_mp5" };
@@ -105,6 +150,7 @@ public void OnPluginStart()
 	g_boardsPerOpening = CreateConVar("sm_zps24ai_boards", "3", "Boards to put on each door/window");
 	g_debug            = CreateConVar("sm_zps24ai_debug", "0", "Log AI decisions");
 	g_upperHeight      = CreateConVar("sm_zps24ai_upper_height", "80", "Nav areas this much above the hold-out floor count as upper floor / roof / balcony");
+	g_learnedStyle     = CreateConVar("sm_zps24ai_learned_style", "1", "Use the shooting and backing-off distances learned from the main player (zps24_learn) once there are enough samples");
 	g_furniture        = CreateConVar("sm_zps24ai_furniture", "1", "Barricaders without a barricade tool carry furniture to the openings");
 	AutoExecConfig(true, "zps24_survivors");
 
@@ -121,18 +167,23 @@ public void OnPluginStart()
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
 	HookEventEx("player_death", Event_PlayerDeath, EventHookMode_Post);
 	HookEventEx("player_hurt", Event_PlayerHurt, EventHookMode_Post);
+	HookEventEx("player_spawn", Event_PlayerSpawn, EventHookMode_Post);
 	RegServerCmd("sm_zps24ai_status", Cmd_Status, "Show the hold-out and barricade progress");
+	RegServerCmd("sm_zps24ai_bots", Cmd_Bots, "What each survivor bot is doing");
+	RegServerCmd("sm_zps24ai_doors", Cmd_Doors, "List every door with its size and the headroom on both sides");
 	ResetRound();
 }
 
 public void OnMapStart()
 {
+	Stairs_OnMapStart();          // hand-made stair routes, plus what the bots learned from you
 	ResetRound();
 	CreateTimer(1.0, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
 void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 {
+	Stairs_Relearn();
 	ResetRound();
 }
 
@@ -140,7 +191,33 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
 	int victim = GetClientOfUserId(event.GetInt("userid"));
 	if (victim > 0 && IsClientInGame(victim) && GetClientTeam(victim) == TEAM_SURVIVORS)
-		g_survivorDeaths++;
+	{
+		int h = g_home[victim];
+		if (h >= 0 && h < MAX_HOMES)
+			g_homeDeaths[h]++;
+	}
+}
+
+// Remember where each survivor bot spawned: that's the house it defends.
+void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (client < 1 || !IsClientInGame(client))
+		return;
+	g_home[client] = -1;
+	g_haveSpawn[client] = false;
+	CreateTimer(0.2, Timer_RecordSpawn, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action Timer_RecordSpawn(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client > 0 && IsClientInGame(client) && IsPlayerAlive(client) && GetClientTeam(client) == TEAM_SURVIVORS)
+	{
+		GetClientAbsOrigin(client, g_spawnPos[client]);
+		g_haveSpawn[client] = true;
+	}
+	return Plugin_Stop;
 }
 
 // A zombie hit a survivor bot: for the next 3 s it turns on that zombie, backs off to a safe
@@ -164,48 +241,62 @@ void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 	Debug("%N hit by %N (%d hp left): backing off", victim, attacker, event.GetInt("health"));
 }
 
-// Overrun: 3+ survivors died at this hold-out within two minutes and zombies are inside it.
-// Remember it as bad and pick the next-best building.
+// Overrun: 3+ survivors died at a home and 3+ zombies are inside it. Remember it as bad; its
+// bots move to the nearest other house.
 void CheckOverrun()
 {
-	if (!g_haveHoldout || GetGameTime() - g_holdoutChosenAt > 120.0 && g_survivorDeaths < 3)
-		return;
-	if (g_survivorDeaths < 3)
-		return;
-	int inside = 0;
-	float pos[3];
-	for (int i = 1; i <= MaxClients; i++)
+	for (int h = 0; h < g_homeCount; h++)
 	{
-		if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+		if (!g_homeValid[h] || g_homeDeaths[h] < 3)
 			continue;
-		GetClientAbsOrigin(i, pos);
-		if (GetVectorDistance(pos, g_holdout) < g_radius.FloatValue)
-			inside++;
+		int inside = 0;
+		float pos[3];
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+				continue;
+			GetClientAbsOrigin(i, pos);
+			if (GetVectorDistance(pos, g_homePos[h]) < g_radius.FloatValue)
+				inside++;
+		}
+		if (inside < 3)
+			continue;
+		if (g_badHoldoutCount < sizeof(g_badHoldout))
+			g_badHoldout[g_badHoldoutCount++] = g_homePos[h];
+		Debug("Overrun at home %d (%.0f %.0f %.0f, %d deaths, %d zombies inside): relocating", h, g_homePos[h][0], g_homePos[h][1], g_homePos[h][2], g_homeDeaths[h], inside);
+		AbandonHome(h);
 	}
-	if (inside < 3)
-		return;
-	if (g_badHoldoutCount < sizeof(g_badHoldout))
-		g_badHoldout[g_badHoldoutCount++] = g_holdout;
-	Debug("Overrun at %.0f %.0f %.0f (%d deaths, %d zombies inside): relocating", g_holdout[0], g_holdout[1], g_holdout[2], g_survivorDeaths, inside);
-	g_haveHoldout = false;
-	g_defendCount = 0;
-	g_upperCount = 0;
+}
+
+void AbandonHome(int h)
+{
+	g_homeValid[h] = false;
+	for (int o = 0; o < g_openingCount; o++)
+		if (g_openingHome[o] == h)
+			g_openingHome[o] = -1;
+	for (int i = 1; i <= MaxClients; i++)
+		if (g_home[i] == h)
+		{
+			if (g_job[i] != JOB_NONE) ReleaseJob(i, false);
+			g_home[i] = -1;
+			g_haveSpawn[i] = false;          // pick the house nearest to where it is now
+		}
 }
 
 void ResetRound()
 {
-	g_haveHoldout = false;
+	g_homeCount = 0;
 	g_openingCount = 0;
-	g_survivorDeaths = 0;
 	g_badHoldoutCount = 0;
-	g_defendCount = 0;
-	g_upperCount = 0;
+	g_badPropCount = 0;
 	g_roundStart = GetGameTime();
 	for (int i = 0; i <= MaxClients; i++)
 	{
 		g_job[i] = JOB_NONE;
 		g_carryProp[i] = INVALID_ENT_REFERENCE;
 		g_givenGun[i] = INVALID_ENT_REFERENCE;
+		g_shoveProp[i] = INVALID_ENT_REFERENCE;
+		g_home[i] = -1;
 		Unstick_Reset(i);
 		g_scripted[i] = false;
 		g_restockUntil[i] = 0.0;
@@ -275,16 +366,30 @@ bool IsExteriorOpening(int ent, const float center[3], float inside[3])
 	n[0] = sx < sy ? 1.0 : 0.0;
 	n[1] = sx < sy ? 0.0 : 1.0;
 	n[2] = 0.0;
+	// Headroom just beside it: one side under a roof (< 400 units), the other open or much higher.
 	float a[3], b[3];
 	for (int i = 0; i < 3; i++) { a[i] = center[i] + n[i] * 48.0; b[i] = center[i] - n[i] * 48.0; }
 	float ua = SpaceAbove(a), ub = SpaceAbove(b);
-	// One side under a roof (< 400 units of headroom), the other open or much higher.
 	if (ua < 400.0 && ub > ua + 300.0)       { inside = n; return true; }
 	if (ub < 400.0 && ua > ub + 300.0)       { for (int i = 0; i < 3; i++) inside[i] = -n[i]; return true; }
-	return false;
+	// Doors often open onto a porch, roofed on both sides. Look farther out: open sky within a
+	// few steps on one side only means the other side is indoors.
+	if (!isDoor)
+		return false;
+	bool skyA = false, skyB = false;
+	for (float dist = 128.0; dist <= 208.0; dist += 80.0)
+	{
+		for (int i = 0; i < 3; i++) { a[i] = center[i] + n[i] * dist; b[i] = center[i] - n[i] * dist; }
+		if (SpaceAbove(a) > 400.0) skyA = true;
+		if (SpaceAbove(b) > 400.0) skyB = true;
+	}
+	if (skyA == skyB)
+		return false;
+	if (skyB) inside = n; else for (int i = 0; i < 3; i++) inside[i] = -n[i];
+	return true;
 }
 
-int CollectOpenings(float pos[][3], float inside[][3], int max)
+int CollectOpenings(float pos[][3], float inside[][3], bool[] isWindow, int[] ents, int max)
 {
 	static const char classes[][] = { "func_door_rotating", "func_door", "prop_door_rotating", "func_breakable_surf", "func_breakable" };
 	int n = 0;
@@ -295,72 +400,180 @@ int CollectOpenings(float pos[][3], float inside[][3], int max)
 		{
 			EntityCenter(ent, pos[n]);
 			if (IsExteriorOpening(ent, pos[n], inside[n]))
+			{
+				isWindow[n] = c >= 3;
+				ents[n] = ent;
+				// Wooden func_breakables of door size are doors too (the church's main doors).
+				if (c == 4)
+				{
+					float mins[3], maxs[3];
+					GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+					GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+					if (GetEntProp(ent, Prop_Data, "m_Material") != 0 && maxs[2] - mins[2] >= 70.0)
+						isWindow[n] = false;
+				}
 				n++;
+			}
 		}
 	}
 	return n;
 }
 
-void ChooseHoldout()
+bool IsBadHoldout(const float pos[3])
 {
-	float all[MAX_OPENINGS * 4][3], allInside[MAX_OPENINGS * 4][3];
-	int count = CollectOpenings(all, allInside, sizeof(all));
-	if (count == 0)
-		return;
+	for (int k = 0; k < g_badHoldoutCount; k++)
+		if (GetVectorDistance(pos, g_badHoldout[k]) < g_radius.FloatValue)
+			return true;
+	return false;
+}
 
-	// The opening with the most other openings nearby marks the most enclosed building.
+// Home for a bot: the house it spawned in (or, after an overrun, the nearest other house).
+// Bots of the same house share it.
+void AssignHome(int client)
+{
+	float from[3];
+	if (g_haveSpawn[client])
+		from = g_spawnPos[client];
+	else
+		GetClientAbsOrigin(client, from);
 	float r = g_radius.FloatValue;
-	int best = -1, bestScore = -1;
+
+	// A home we already have that this spot is in or right next to.
+	int best = -1;
+	float bestDist = r;
+	for (int h = 0; h < g_homeCount; h++)
+	{
+		if (!g_homeValid[h])
+			continue;
+		float d = GetVectorDistance(from, g_homePos[h]);
+		if (d < bestDist) { bestDist = d; best = h; }
+	}
+	if (best == -1)
+		best = CreateHome(from);
+	if (best == -1)
+		return;
+	g_home[client] = best;
+	g_defendIdx[client] = GetRandomInt(0, 7);
+	g_defendSwitch[client] = 0.0;
+	Debug("%N defends home %d", client, best);
+}
+
+// Make a home of the building nearest to `from`: the exterior door or window closest to it and
+// every other one within sm_zps24ai_holdout_radius of that. Returns the home or -1.
+int CreateHome(const float from[3])
+{
+	static float all[MAX_OPENINGS * 4][3], allInside[MAX_OPENINGS * 4][3];
+	static bool allWindow[MAX_OPENINGS * 4];
+	static int allEnt[MAX_OPENINGS * 4];
+	int count = CollectOpenings(all, allInside, allWindow, allEnt, sizeof(all));
+	if (count == 0)
+		return -1;
+	float r = g_radius.FloatValue;
+
+	int seed = -1;
+	float seedDist = 999999.0;
 	for (int i = 0; i < count; i++)
 	{
-		bool bad = false;
-		for (int k = 0; k < g_badHoldoutCount; k++)
-			if (GetVectorDistance(all[i], g_badHoldout[k]) < r) { bad = true; break; }
-		if (bad)
+		if (IsBadHoldout(all[i]))
 			continue;
-		int score = 0;
-		for (int j = 0; j < count; j++)
-			if (GetVectorDistance(all[i], all[j]) <= r)
-				score++;
-		if (score > bestScore) { bestScore = score; best = i; }
+		float d = GetVectorDistance(from, all[i]);
+		if (d < seedDist) { seedDist = d; seed = i; }
+	}
+	if (seed == -1)
+		return -1;
+
+	int h = -1;
+	for (int k = 0; k < g_homeCount; k++)
+		if (!g_homeValid[k]) { h = k; break; }
+	if (h == -1)
+	{
+		if (g_homeCount >= MAX_HOMES)
+		{
+			// Out of slots: join the nearest home.
+			float bd = 999999.0;
+			for (int k = 0; k < g_homeCount; k++)
+				if (g_homeValid[k] && GetVectorDistance(from, g_homePos[k]) < bd) { bd = GetVectorDistance(from, g_homePos[k]); h = k; }
+			return h;
+		}
+		h = g_homeCount++;
 	}
 
-	// Hold-out = average of that cluster, snapped to the nav mesh.
+	// Its doors and windows; the home's center is their average, snapped to the nav mesh.
 	float sum[3];
 	int members = 0;
-	g_openingCount = 0;
 	for (int j = 0; j < count; j++)
 	{
-		if (GetVectorDistance(all[best], all[j]) > r)
+		if (GetVectorDistance(all[seed], all[j]) > r)
 			continue;
 		AddVectors(sum, all[j], sum);
 		members++;
-		if (g_openingCount < MAX_OPENINGS)
-		{
-			g_openingPos[g_openingCount] = all[j];
-			g_openingInside[g_openingCount] = allInside[j];
-			g_openingBoards[g_openingCount] = 0;
-			g_openingClaim[g_openingCount] = 0;
-			g_openingDone[g_openingCount] = false;
-			g_openingCount++;
-		}
+		bool known = false;
+		for (int o = 0; o < g_openingCount; o++)
+			if (GetVectorDistance(g_openingPos[o], all[j]) < 1.0)
+			{
+				known = true;
+				if (g_openingHome[o] == -1) g_openingHome[o] = h;
+				break;
+			}
+		if (known || g_openingCount >= MAX_OPENINGS)
+			continue;
+		int o = g_openingCount++;
+		g_openingPos[o] = all[j];
+		g_openingInside[o] = allInside[j];
+		g_openingWindow[o] = allWindow[j];
+		g_openingEnt[o] = allEnt[j];
+		g_openingHome[o] = h;
+		g_openingBoards[o] = 0;
+		g_openingClaim[o] = 0;
+		g_openingDone[o] = false;
 	}
 	ScaleVector(sum, 1.0 / float(members));
 
-	Address area = NavBotNavMesh.GetNearestNavArea(sum, 600.0, false, true);
-	if (area == Address_Null)
-		return;
-	NavBotNavArea.GetCenter(area, g_holdout);
-	g_haveHoldout = true;
-	g_holdoutChosenAt = GetGameTime();
-	g_survivorDeaths = 0;
-	BuildDefendSpots(area);
-	Debug("Hold-out at %.0f %.0f %.0f with %d exterior openings (of %d on the map)", g_holdout[0], g_holdout[1], g_holdout[2], g_openingCount, count);
+	// Center on the spawn when the bot spawned indoors there, else on the openings.
+	// (If the spawn's bit of nav mesh is a small island, e.g. a closet, use the openings instead.)
+	bool indoors = SpaceAbove(from) < 400.0 && seedDist < r;
+	for (int attempt = indoors ? 0 : 1; attempt < 2; attempt++)
+	{
+		Address area = NavBotNavMesh.GetNearestNavArea(attempt == 0 ? from : sum, 600.0, false, true);
+		if (area == Address_Null)
+			continue;
+		NavBotNavArea.GetCenter(area, g_homePos[h]);
+		if (BuildDefendSpots(h, area) >= 12 || attempt == 1)
+			break;
+	}
+	if (g_defendCount[h] == 0)
+	{
+		for (int o = 0; o < g_openingCount; o++)
+			if (g_openingHome[o] == h) g_openingHome[o] = -1;
+		return -1;
+	}
+	g_homeValid[h] = true;
+	g_homeChosenAt[h] = GetGameTime();
+	g_homeDeaths[h] = 0;
+	Debug("Home %d at %.0f %.0f %.0f with %d doors/windows (%d on the map)", h, g_homePos[h][0], g_homePos[h][1], g_homePos[h][2], members, count);
+	return h;
 }
 
-// Rank the hold-out building's walkable areas: highest first (upper floors, roofs, balconies),
-// then "corners" (areas with few neighbours). Each defending bot gets its own spot.
-void BuildDefendSpots(Address start)
+// Is there a window of home h within dist (same floor)?
+bool NearWindow(int h, const float pos[3], float dist)
+{
+	for (int o = 0; o < g_openingCount; o++)
+	{
+		if (!g_openingWindow[o] || (h != -1 && g_openingHome[o] != h))
+			continue;
+		if (FloatAbs(pos[2] - g_openingPos[o][2]) > 90.0)
+			continue;
+		float dx = pos[0] - g_openingPos[o][0], dy = pos[1] - g_openingPos[o][1];
+		if (dx * dx + dy * dy < dist * dist)
+			return true;
+	}
+	return false;
+}
+
+// Rank the home's walkable areas: highest first (upper floors, roofs, balconies), then
+// "corners" (areas with few neighbours). Areas next to windows are left out: bots hold back and
+// shoot whatever climbs in. Each defending bot gets its own spot.
+int BuildDefendSpots(int h, Address start)
 {
 	NavBotNavAreaCollector c = new NavBotNavAreaCollector();
 	c.SetSearchStartArea(start);
@@ -371,7 +584,7 @@ void BuildDefendSpots(Address start)
 	delete c;
 
 	int n = v.Size;
-	float scores[512], centers[512][3];
+	static float scores[512], centers[512][3];
 	if (n > 512) n = 512;
 	float floorZ = 999999.0;          // the building's ground floor = lowest collected area
 	for (int i = 0; i < n; i++)
@@ -386,40 +599,70 @@ void BuildDefendSpots(Address start)
 		int neighbours = 0;
 		for (int d = 0; d < 4; d++)
 			neighbours += NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
-		// Elevation dominates; few neighbours (a corner) breaks ties; stay close to the building.
+		// Elevation dominates; few neighbours (a corner) breaks ties; stay close to the building;
+		// keep well back from windows; stay indoors.
 		scores[i] = (height >= g_upperHeight.FloatValue ? 1000.0 + height : 0.0)
 			+ (neighbours <= 2 ? 200.0 : 0.0)
-			- GetVectorDistance(centers[i], g_holdout) * 0.2;
+			- GetVectorDistance(centers[i], g_homePos[h]) * 0.2
+			- (NearWindow(h, centers[i], 150.0) ? 5000.0 : 0.0)
+			- (SpaceAbove(centers[i]) > 400.0 ? 600.0 : 0.0);
 	}
 	delete v;
 
-	// Pick the best MAX_DEFEND spots, at least 96 units apart so bots don't stack.
-	g_defendCount = 0;
-	g_upperCount = 0;
-	g_floorZ = floorZ;
+	// The main player's hold spots in this house come first (most-held first); they count with
+	// the upstairs spots as the preferred ones.
+	g_defendCount[h] = 0;
+	g_upperCount[h] = 0;
+	g_floorZ[h] = floorZ;
+	bool taken[LEARN_MAX_SPOTS];
+	for (;;)
+	{
+		int pick = -1;
+		for (int i = 0; i < g_ln_spotCount; i++)
+		{
+			if (taken[i] || GetVectorDistance(g_ln_spots[i], g_homePos[h]) > g_radius.FloatValue * 1.3)
+				continue;
+			if (pick == -1 || g_ln_spotSecs[i] > g_ln_spotSecs[pick])
+				pick = i;
+		}
+		if (pick == -1 || g_defendCount[h] >= MAX_DEFEND / 2)
+			break;
+		taken[pick] = true;
+		bool tooClose = false;
+		for (int k = 0; k < g_defendCount[h]; k++)
+			if (GetVectorDistance(g_ln_spots[pick], g_defendPos[h][k]) < 64.0) { tooClose = true; break; }
+		if (tooClose)
+			continue;
+		g_defendPos[h][g_defendCount[h]++] = g_ln_spots[pick];
+		g_upperCount[h]++;
+	}
+	int learned = g_defendCount[h];
+
+	// Then the best of the rest, at least 96 units apart so bots don't stack.
 	bool used[512];
-	while (g_defendCount < MAX_DEFEND)
+	while (g_defendCount[h] < MAX_DEFEND)
 	{
 		int best = -1;
 		for (int i = 0; i < n; i++)
 		{
-			if (used[i] || (best != -1 && scores[i] <= scores[best]))
+			if (used[i] || scores[i] < -2000.0 || (best != -1 && scores[i] <= scores[best]))
 				continue;
 			bool tooClose = false;
-			for (int k = 0; k < g_defendCount; k++)
-				if (GetVectorDistance(centers[i], g_defendPos[k]) < 96.0) { tooClose = true; break; }
+			for (int k = 0; k < g_defendCount[h]; k++)
+				if (GetVectorDistance(centers[i], g_defendPos[h][k]) < 96.0) { tooClose = true; break; }
 			if (!tooClose)
 				best = i;
 		}
 		if (best == -1)
 			break;
 		used[best] = true;
-		g_defendPos[g_defendCount] = centers[best];
-		g_defendCount++;
+		g_defendPos[h][g_defendCount[h]] = centers[best];
+		g_defendCount[h]++;
 		if (centers[best][2] - floorZ >= g_upperHeight.FloatValue)
-			g_upperCount++;             // spots are picked best-first, so upper ones come first
+			g_upperCount[h]++;          // spots are picked best-first, so upper ones come first
 	}
-	Debug("%d defend spots (best %.0f units above the ground floor)", g_defendCount, g_defendCount ? g_defendPos[0][2] - floorZ : 0.0);
+	Debug("Home %d: %d defend spots (%d learned from the main player) from %d areas (best %.0f units above the ground floor)", h, g_defendCount[h], learned, n, g_defendCount[h] ? g_defendPos[h][0][2] - floorZ : 0.0);
+	return n;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -569,9 +812,32 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 		return Plugin_Handled;
 	}
 
+	// Loose furniture in the way: shove it aside with bare hands (right click), like a player
+	// would, instead of bumping into it. Never barricades or furniture blocking a door.
+	if (StrContains(cls, "prop_physics") != -1 && !IsBarricadeProp(entity) && !IsBadProp(entity)
+		&& EntIndexToEntRef(entity) != g_carryProp[client] && GetGameTime() > g_shoveUntil[client] + 2.0)
+	{
+		float zd, pos[3];
+		GetEntPropVector(entity, Prop_Data, "m_vecAbsOrigin", pos);
+		if (EntIndexToEntRef(entity) == g_shoveProp[client] && GetVectorDistance(pos, g_shoveFrom[client]) < 10.0)
+		{
+			// Shoved it last time and it didn't budge: too heavy or wedged. Walk around it.
+			if (g_badPropCount < sizeof(g_badProp))
+				g_badProp[g_badPropCount++] = g_shoveProp[client];
+			Debug("%N: furniture %d won't move, walking around it", client, entity);
+		}
+		else if (NearestZombie(client, 400.0, zd) == 0 && FindOwnedWeapon(client, "weapon_emptyhand") != -1)
+		{
+			g_shoveProp[client] = EntIndexToEntRef(entity);
+			g_shoveFrom[client] = pos;
+			g_shoveUntil[client] = GetGameTime() + 3.0;
+			Debug("%N shoves furniture %d out of the way", client, entity);
+		}
+	}
+
 	if (StrContains(cls, "breakable") != -1 || StrContains(cls, "prop_physics") != -1 || StrContains(cls, "physbox") != -1
 		|| StrContains(cls, "barricade") != -1)
-		return Plugin_Handled;   // walk around it instead of smashing it
+		return Plugin_Handled;   // walk around (or shove) it instead of smashing it
 
 	return Plugin_Continue;
 }
@@ -579,17 +845,22 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 // ---------------------------------------------------------------------------------------------
 // Barricading
 
+// A door of the bot's home to block with furniture. Windows are left alone: bots keep away from
+// them and shoot what comes through.
 int ClaimOpening(int client)
 {
+	int h = g_home[client];
+	if (h < 0)
+		return -1;
 	float me[3];
 	GetClientAbsOrigin(client, me);
 	int best = -1;
 	float bestDist = 999999.0;
 	for (int i = 0; i < g_openingCount; i++)
 	{
-		if (g_openingDone[i] || (g_openingClaim[i] != 0 && g_openingClaim[i] != client))
+		if (g_openingHome[i] != h || g_openingWindow[i] || g_openingDone[i] || (g_openingClaim[i] != 0 && g_openingClaim[i] != client))
 			continue;
-		if (g_defendCount > 0 && g_openingPos[i][2] - g_floorZ >= g_upperHeight.FloatValue)
+		if (g_defendCount[h] > 0 && g_openingPos[i][2] - g_floorZ[h] >= g_upperHeight.FloatValue)
 			continue;               // barricade the ground floor; upstairs is where we fight from
 		float d = GetVectorDistance(me, g_openingPos[i]);
 		if (d < bestDist) { bestDist = d; best = i; }
@@ -599,11 +870,11 @@ int ClaimOpening(int client)
 	return best;
 }
 
-int CountBarricaders()
+int CountBarricaders(int h)
 {
 	int n = 0;
 	for (int i = 1; i <= MaxClients; i++)
-		if (g_job[i] == JOB_BARRICADE && IsClientInGame(i) && IsPlayerAlive(i))
+		if (g_job[i] == JOB_BARRICADE && g_home[i] == h && IsClientInGame(i) && IsPlayerAlive(i))
 			n++;
 	return n;
 }
@@ -646,8 +917,36 @@ void StandPoint(int o, float out[3])
 	SnapToNav(raw, out);
 }
 
-// Light physics props near an opening that a survivor can carry with E.
-int FindFurniture(const float near[3], float maxDist)
+// Barricade boards, and furniture already blocking a door: leave those alone.
+bool IsBarricadeProp(int ent)
+{
+	char model[128];
+	if (HasEntProp(ent, Prop_Data, "m_ModelName"))
+	{
+		GetEntPropString(ent, Prop_Data, "m_ModelName", model, sizeof(model));
+		if (StrContains(model, "barricade", false) != -1)
+			return true;
+	}
+	float pos[3];
+	GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", pos);
+	for (int o = 0; o < g_openingCount; o++)
+		if (!g_openingWindow[o] && g_openingHome[o] != -1 && GetVectorDistance(pos, g_openingPos[o]) < 90.0)
+			return true;
+	return false;
+}
+
+bool IsBadProp(int ent)
+{
+	int ref = EntIndexToEntRef(ent);
+	for (int i = 0; i < g_badPropCount; i++)
+		if (g_badProp[i] == ref)
+			return true;
+	return false;
+}
+
+// Physics props near a door that a survivor can shove: roughly chair to cabinet sized, on the
+// same floor, not a barricade, not already found to be too heavy.
+int FindFurniture(int o, float maxDist)
 {
 	static const char classes[][] = { "prop_physics_multiplayer", "prop_physics", "prop_physics_override", "prop_physics_respawnable" };
 	int best = -1;
@@ -657,87 +956,184 @@ int FindFurniture(const float near[3], float maxDist)
 		int ent = -1;
 		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
 		{
-			if (GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity") != -1)
+			if (GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity") != -1 || IsBadProp(ent) || IsBarricadeProp(ent))
 				continue;
 			float mins[3], maxs[3], pos[3];
 			GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
 			GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
-			// Skip tiny clutter and huge objects; furniture is roughly crate/chair/table sized.
 			float size = (maxs[0] - mins[0]) + (maxs[1] - mins[1]) + (maxs[2] - mins[2]);
-			if (size < 40.0 || size > 220.0)
+			if (size < 50.0 || size > 260.0)
 				continue;
 			GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", pos);
-			if (FloatAbs(pos[2] - near[2]) > 120.0)     // same floor
+			if (FloatAbs(pos[2] - g_openingPos[o][2]) > 90.0)     // same floor
 				continue;
-			float d = GetVectorDistance(pos, near);
+			// Must be indoors, on the home side of the door.
+			float rel[3];
+			SubtractVectors(pos, g_openingPos[o], rel);
+			if (GetVectorDotProduct(rel, g_openingInside[o]) < 0.0)
+				continue;
+			float d = GetVectorDistance(pos, g_openingPos[o]);
 			if (d < bestDist) { bestDist = d; best = ent; }
 		}
 	}
 	return best;
 }
 
-// Carry a piece of furniture to the opening with E and drop it there.
+// Hold bare hands (ZPS's H key). Returns true once they're out.
+bool HoldHands(int client, NavBot bot)
+{
+	int hands = FindOwnedWeapon(client, "weapon_emptyhand");
+	if (hands == -1)
+		return false;
+	g_handsUntil[client] = GetGameTime() + 2.0;
+	if (GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") == hands)
+		return true;
+	if (GetGameTime() >= g_nextUse[client])
+	{
+		bot.DelayedFakeClientCommand("use weapon_emptyhand");
+		g_nextUse[client] = GetGameTime() + 0.5;
+	}
+	return false;
+}
+
+// One right-click shove at a point (bare hands punt physics objects along the aim). The hands'
+// punt barely moves heavier furniture, so the shove also gives the prop a push of its own, in
+// `dir` (flat), as long as it's really within arm's reach.
+void Shove(int client, NavBot bot, const float at[3], int prop, const float dir[3])
+{
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, at, LOOK_PRIORITY, 0.5, "Shoving furniture");
+	if (!HoldHands(client, bot) || !NavBotPlayerControllerInterface.IsAimOnTarget(ctrl) || GetGameTime() < g_nextUse[client])
+		return;
+	NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKSEC, 0.15);
+	g_nextUse[client] = GetGameTime() + 0.9;
+	g_pushes[client]++;
+
+	float eye[3], c[3];
+	GetClientEyePosition(client, eye);
+	EntityCenter(prop, c);
+	if (GetVectorDistance(eye, c) > 85.0)
+		return;
+	DataPack pack;
+	CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);   // as the hands connect
+	pack.WriteCell(EntIndexToEntRef(prop));
+	pack.WriteFloat(dir[0]);
+	pack.WriteFloat(dir[1]);
+}
+
+Action Timer_ShoveImpulse(Handle timer, DataPack pack)
+{
+	pack.Reset();
+	int prop = EntRefToEntIndex(pack.ReadCell());
+	if (prop == INVALID_ENT_REFERENCE)
+		return Plugin_Stop;
+	float vel[3];
+	vel[0] = pack.ReadFloat() * 220.0;
+	vel[1] = pack.ReadFloat() * 220.0;
+	vel[2] = 40.0;                          // a little lift so it slides instead of digging in
+	TeleportEntity(prop, NULL_VECTOR, NULL_VECTOR, vel);
+	return Plugin_Stop;
+}
+
+// Shove a piece of furniture into a door of the home: stand behind it (the side away from the
+// door), bare hands out, right click, repeat. Furniture that doesn't get closer after several
+// shoves is too heavy; try another piece.
 bool DoFurniture(int client, NavBot bot, float moveGoal[3])
 {
 	int o = g_jobOpening[client];
-	Address ctrl = bot.GetPlayerControllerInterface();
-	float me[3], stand[3];
+	float me[3];
 	GetClientAbsOrigin(client, me);
-	StandPoint(o, stand);
 
 	int prop = EntRefToEntIndex(g_carryProp[client]);
 	if (prop == INVALID_ENT_REFERENCE)
 	{
-		prop = FindFurniture(g_openingPos[o], 700.0);
+		prop = FindFurniture(o, 650.0);
 		if (prop == -1)
 		{
 			ReleaseJob(client, true);   // nothing to use here
 			return false;
 		}
 		g_carryProp[client] = EntIndexToEntRef(prop);
-		g_carryStarted[client] = 0.0;
+		g_pushes[client] = 0;
+		g_pushStuck[client] = 0;
+		g_pushBest[client] = 999999.0;
 	}
 
-	float propPos[3];
+	// Where the furniture should end up: against the door, just inside.
+	float dest[3], propPos[3], center[3];
+	for (int i = 0; i < 3; i++)
+		dest[i] = g_openingPos[o][i] + g_openingInside[o][i] * 20.0;
 	GetEntPropVector(prop, Prop_Data, "m_vecAbsOrigin", propPos);
-	bool carrying = g_carryStarted[client] > 0.0 && GetVectorDistance(propPos, me) < 110.0;
-
-	if (!carrying)
+	EntityCenter(prop, center);
+	dest[2] = propPos[2];
+	float d = GetVectorDistance(propPos, dest);
+	if (d < 45.0)
 	{
-		// Furniture already at the opening counts as a barricade.
-		if (GetVectorDistance(propPos, g_openingPos[o]) < 70.0)
-		{
-			g_carryProp[client] = INVALID_ENT_REFERENCE;
-			g_openingBoards[o]++;
-			if (g_openingBoards[o] >= g_boardsPerOpening.IntValue)
-				ReleaseJob(client, true);
-			return false;
-		}
-		SnapToNav(propPos, moveGoal);
-		if (GetVectorDistance(me, propPos) < 100.0 && GetGameTime() >= g_nextUse[client])
-		{
-			NavBotPlayerControllerInterface.AimAtEntity(ctrl, prop, LOOK_USE, 0.6, "Picking up furniture");
-			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.2);
-			g_nextUse[client] = GetGameTime() + 1.0;
-			g_carryStarted[client] = GetGameTime();
-		}
-		return true;
-	}
-
-	// Carrying: walk to the opening, then drop it in the gap.
-	moveGoal = stand;
-	if (GetVectorDistance(me, stand) > 60.0 && GetGameTime() - g_carryStarted[client] < 25.0)
-		return true;
-	NavBotPlayerControllerInterface.AimAtPos(ctrl, g_openingPos[o], LOOK_PRIORITY, 0.6, "Placing furniture");
-	if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl) && GetGameTime() >= g_nextUse[client])
-	{
-		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.2);   // drop
-		g_nextUse[client] = GetGameTime() + 1.0;
-		g_carryStarted[client] = 0.0;
 		g_openingBoards[o]++;
-		Debug("%N placed furniture at opening %d", client, o);
+		Debug("%N shoved furniture into door %d (%d/%d)", client, o, g_openingBoards[o], g_boardsPerOpening.IntValue);
+		g_carryProp[client] = INVALID_ENT_REFERENCE;
 		if (g_openingBoards[o] >= g_boardsPerOpening.IntValue)
 			ReleaseJob(client, true);
+		return false;
+	}
+	if (d < g_pushBest[client] - 8.0)
+	{
+		g_pushBest[client] = d;
+		g_pushStuck[client] = 0;
+	}
+
+	// Stand behind it, on the line from the door through the furniture.
+	float back[3], push[3];
+	SubtractVectors(propPos, dest, back);
+	back[2] = 0.0;
+	NormalizeVector(back, back);
+	ScaleVector(back, 50.0);
+	AddVectors(center, back, push);
+	push[2] = me[2];
+	if (GetVectorDistance(me, push) > 36.0)
+	{
+		SnapToNav(push, moveGoal);
+		if (GetVectorDistance(me, moveGoal) > 36.0)
+			return true;
+		// The push spot is off the mesh (furniture against a wall): shove from as close as we can.
+	}
+	// Bare hands only reach about 70 units: step in until the furniture is within reach.
+	float eye[3];
+	GetClientEyePosition(client, eye);
+	if (GetVectorDistance(eye, center) > 70.0)
+	{
+		float step[3];
+		SubtractVectors(center, me, step);
+		step[2] = 0.0;
+		NormalizeVector(step, step);
+		ScaleVector(step, 30.0);
+		AddVectors(me, step, step);
+		if (++g_pushStuck[client] > 40)
+		{
+			if (g_badPropCount < sizeof(g_badProp))
+				g_badProp[g_badPropCount++] = g_carryProp[client];
+			Debug("%N: can't get within reach of furniture %d, trying another", client, prop);
+			g_carryProp[client] = INVALID_ENT_REFERENCE;
+			return false;
+		}
+		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), step, 100);
+		return false;
+	}
+
+	int before = g_pushes[client];
+	center[2] -= 4.0;
+	float toward[3];
+	SubtractVectors(dest, propPos, toward);
+	toward[2] = 0.0;
+	NormalizeVector(toward, toward);
+	Shove(client, bot, center, prop, toward);
+	if (g_pushes[client] > before)
+		Debug("%N shove #%d: furniture %d is %.0f from door %d", client, g_pushes[client], prop, d, o);
+	if (g_pushes[client] > before && (g_pushStuck[client] += 6) > 36)
+	{
+		if (g_badPropCount < sizeof(g_badProp))
+			g_badProp[g_badPropCount++] = g_carryProp[client];
+		Debug("%N: furniture %d won't move, trying another", client, prop);
 		g_carryProp[client] = INVALID_ENT_REFERENCE;
 	}
 	return false;
@@ -1002,7 +1398,7 @@ bool HasMainGun(int client)
 // starts, so they walked around with keyboards and brooms).
 void HoldBestGun(int client, NavBot bot)
 {
-	if (g_job[client] == JOB_BARRICADE || GetGameTime() < g_nextUse[client])
+	if (g_job[client] == JOB_BARRICADE || GetGameTime() < g_nextUse[client] || GetGameTime() < g_handsUntil[client])
 		return;
 	float zd;
 	if (NearestZombie(client, 600.0, zd) != 0)
@@ -1030,7 +1426,6 @@ bool ArmBot(int client, NavBot bot)
 	if (!g_giveWeapons.BoolValue || HasMainGun(client))
 	{
 		g_armTries[client] = 0;
-		if (logNow) Debug("%N: ArmBot skip (give=%d mainGun=%d)", client, g_giveWeapons.BoolValue, HasMainGun(client));
 		g_givenGun[client] = INVALID_ENT_REFERENCE;
 		return false;
 	}
@@ -1101,8 +1496,26 @@ bool TraceOnlyWorldAndZombies(int entity, int mask, int self)
 	return true;
 }
 
-// Nearest living zombie whose head or chest the bot can see (window glass between counts as
-// "seeable": it breaks when shot).
+// Can the bot shoot zombie i without hitting anything of ours? Doors, barricade boards and intact
+// windows are in the way (shooting would wreck them); shattered windows are not.
+bool ClearShot(int client, int i)
+{
+	float eye[3], target[3];
+	GetClientEyePosition(client, eye);
+	GetClientEyePosition(i, target);
+	target[2] -= 12.0;
+	TR_TraceRayFilter(eye, target, MASK_SHOT, RayType_EndPoint, TraceOnlyWorldAndZombies, client);
+	int hit = TR_GetEntityIndex();
+	if (!TR_DidHit() || hit == i)
+		return true;
+	if (hit <= MaxClients || !IsValidEntity(hit))
+		return false;
+	char cls[64];
+	GetEntityClassname(hit, cls, sizeof(cls));
+	return StrEqual(cls, "func_breakable_surf") && HasEntProp(hit, Prop_Send, "m_bIsBroken") && GetEntProp(hit, Prop_Send, "m_bIsBroken") != 0;
+}
+
+// Nearest living zombie the bot has a clear shot at.
 int NearestVisibleZombie(int client, float range, float &dist)
 {
 	float eye[3], target[3];
@@ -1116,31 +1529,34 @@ int NearestVisibleZombie(int client, float range, float &dist)
 		GetClientEyePosition(i, target);
 		target[2] -= 12.0;
 		float d = GetVectorDistance(eye, target);
-		if (d >= dist)
-			continue;
-		TR_TraceRayFilter(eye, target, MASK_SHOT, RayType_EndPoint, TraceOnlyWorldAndZombies, client);
-		int hit = TR_GetEntityIndex();
-		bool visible = !TR_DidHit() || hit == i;
-		if (!visible && hit > MaxClients && IsValidEntity(hit))
-		{
-			char cls[64];
-			GetEntityClassname(hit, cls, sizeof(cls));
-			// Shoot through window glass only. Doors (func_breakable wood or metal, e.g. the church's
-			// main doors) and barricade boards would get shot to pieces.
-			visible = StrEqual(cls, "func_breakable_surf")
-				|| (StrEqual(cls, "func_breakable") && GetEntProp(hit, Prop_Data, "m_Material") == 0);
-		}
-		if (visible) { dist = d; best = i; }
+		if (d < dist && ClearShot(client, i)) { dist = d; best = i; }
 	}
 	return best;
+}
+
+// Out with the best gun if the bot is holding hands, a tool or a melee weapon.
+void DrawGun(int client, NavBot bot)
+{
+	int best = BestGun(client);
+	if (best == -1 || GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") == best || GetGameTime() < g_nextUse[client])
+		return;
+	if (IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
+		return;
+	char cls[64], cmd[80];
+	GetEntityClassname(best, cls, sizeof(cls));
+	Format(cmd, sizeof(cmd), "use %s", cls);
+	bot.DelayedFakeClientCommand(cmd);
+	g_nextUse[client] = GetGameTime() + 0.5;
+	g_handsUntil[client] = 0.0;
 }
 
 // Returns true while fighting (the caller then only moves if the zombie is right on top of us).
 bool SelfDefence(int client, NavBot bot, int &zombie, float &zdist)
 {
-	zombie = NearestVisibleZombie(client, g_engageRange.FloatValue, zdist);
+	zombie = NearestVisibleZombie(client, EngageRange(), zdist);
 	if (!zombie)
 		return false;
+	DrawGun(client, bot);
 	int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 	Address ctrl = bot.GetPlayerControllerInterface();
 	NavBotPlayerControllerInterface.AimAtEntity(ctrl, zombie, LOOK_COMBAT, 0.4, "Shooting zombie");
@@ -1186,6 +1602,8 @@ bool RetreatSpot(int client, const float them[3], float out[3])
 		if (area == Address_Null)
 			continue;
 		NavBotNavArea.GetClosestPointOnArea(area, end, spot);
+		if (NearWindow(g_home[client], spot, 100.0))
+			continue;               // don't back into a window
 		float d = GetVectorDistance(spot, them);
 		if (d > best + 40.0)        // prefer the straighter direction unless another is clearly better
 		{
@@ -1226,9 +1644,13 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 
 	if (ArmBot(client, bot))
+	{
+		strcopy(g_state[client], sizeof(g_state[]), "arming");
 		return Hold(client);
+	}
 	if (Unstick_Goal(client, moveGoal))
 	{
+		strcopy(g_state[client], sizeof(g_state[]), "unsticking");
 		routeType = NAVBOT_FASTEST_ROUTE;
 		return Plugin_Changed;              // detour around whatever we're stuck on
 	}
@@ -1253,25 +1675,29 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		float them[3];
 		GetClientAbsOrigin(attacker, them);
 		float d = GetVectorDistance(me, them);
-		if (d < g_safeDist.FloatValue)
+		if (d < SafeDist())
 		{
 			hurt = true;
 			zombie = attacker;
 			zdist = d;
+			DrawGun(client, bot);
 			Address ctrl = bot.GetPlayerControllerInterface();
 			NavBotPlayerControllerInterface.AimAtEntity(ctrl, attacker, LOOK_CRITICAL, 0.4, "Hit by a zombie");
 			int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 			if (IsGun(weapon) && GetEntProp(weapon, Prop_Send, "m_iClip1") <= 0)
 				NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_RELOAD, 0.2);
-			else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+			else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl) && ClearShot(client, attacker))
 				NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.1);
 		}
 		else
 			g_hurtUntil[client] = 0.0;      // already at a safe distance
 	}
 
-	if (fighting && !hurt && zdist > g_safeDist.FloatValue)
-		return Hold(client);                // stand our ground and shoot
+	if (fighting && !hurt && zdist > SafeDist())
+	{
+		strcopy(g_state[client], sizeof(g_state[]), "standing and shooting");
+		return Hold(client);
+	}                // stand our ground and shoot
 
 	if (zombie && (hurt || IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon"))))
 	{
@@ -1280,16 +1706,17 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		// Fall back inside the hold-out: the defend spot farthest from the zombie, if it's a real
 		// step back; otherwise the best open direction away from it.
 		int best = -1;
+		int h = g_home[client];
 		float bestScore = GetVectorDistance(me, them) + 150.0;
-		int candidates = g_upperCount > 0 ? g_upperCount : g_defendCount;   // never fall back downstairs
+		int candidates = h < 0 ? 0 : g_upperCount[h] > 0 ? g_upperCount[h] : g_defendCount[h];   // never fall back downstairs
 		for (int i = 0; i < candidates; i++)
 		{
-			float d = GetVectorDistance(g_defendPos[i], them);
-			if (d > bestScore && GetVectorDistance(g_defendPos[i], me) < 700.0) { bestScore = d; best = i; }
+			float d = GetVectorDistance(g_defendPos[h][i], them);
+			if (d > bestScore && GetVectorDistance(g_defendPos[h][i], me) < 700.0) { bestScore = d; best = i; }
 		}
 		if (best != -1)
 		{
-			moveGoal = g_defendPos[best];
+			moveGoal = g_defendPos[h][best];
 			g_defendIdx[client] = best;
 			g_defendSwitch[client] = GetGameTime() + 20.0;
 		}
@@ -1303,7 +1730,38 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 			AddVectors(me, away, moveGoal);
 		}
 		routeType = NAVBOT_FASTEST_ROUTE;
+		strcopy(g_state[client], sizeof(g_state[]), "falling back");
 		return MoveTo(client, moveGoal);
+	}
+
+	// Furniture in the way (see OnNavBotObstacleOnPath): shove it aside, a bit off our line so it
+	// ends up beside the path rather than further along it.
+	if (GetGameTime() < g_shoveUntil[client])
+	{
+		int prop = EntRefToEntIndex(g_shoveProp[client]);
+		if (prop != INVALID_ENT_REFERENCE)
+		{
+			float c[3], dir[3], ang[3], at[3];
+			EntityCenter(prop, c);
+			SubtractVectors(c, me, dir);
+			float dist = GetVectorLength(dir);
+			if (dist < 110.0)
+			{
+				GetVectorAngles(dir, ang);
+				ang[1] += (client % 2 == 0) ? 20.0 : -20.0;
+				GetAngleVectors(ang, dir, NULL_VECTOR, NULL_VECTOR);
+				ScaleVector(dir, dist);
+				GetClientAbsOrigin(client, at);
+				AddVectors(at, dir, at);
+				at[2] = c[2] - 4.0;
+				dir[2] = 0.0;
+				NormalizeVector(dir, dir);
+				Shove(client, bot, at, prop, dir);
+				strcopy(g_state[client], sizeof(g_state[]), "shoving furniture aside");
+				return Hold(client);
+			}
+		}
+		g_shoveUntil[client] = 0.0;
 	}
 
 	if (g_job[client] == JOB_BARRICADE)
@@ -1311,42 +1769,69 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		if (DoBarricade(client, bot, moveGoal))
 		{
 			routeType = NAVBOT_SAFEST_ROUTE;
+			strcopy(g_state[client], sizeof(g_state[]), "barricading: walking");
 			return MoveTo(client, moveGoal);
 		}
+		strcopy(g_state[client], sizeof(g_state[]), "barricading: working");
 		return Hold(client);
 	}
 
 	// Defend: hold a spot (upper floor / roof / balcony / corner), move to another one every
 	// 25-45 s, and keep turning to watch different doors and windows.
+	int h = g_home[client];
+	if (h < 0)
+	{
+		strcopy(g_state[client], sizeof(g_state[]), "no home");
+		return Hold(client);
+	}
 	float spot[3];
-	spot = g_holdout;
-	if (g_defendCount > 0)
+	spot = g_homePos[h];
+	if (g_defendCount[h] > 0)
 	{
 		float zd;
 		bool calm = NearestZombie(client, 900.0, zd) == 0;
 		if (GetGameTime() >= g_defendSwitch[client] && calm)
 		{
 			// Upstairs whenever the building has an upper floor, roof or balcony.
-			int top = g_upperCount > 0 ? g_upperCount : g_defendCount;
+			int top = g_upperCount[h] > 0 ? g_upperCount[h] : g_defendCount[h];
+			if (top < 4) top = g_defendCount[h] < 4 ? g_defendCount[h] : 4;   // don't all pile onto one spot
 			if (top > 8) top = 8;
 			g_defendIdx[client] = GetRandomInt(0, top - 1);
 			g_defendSwitch[client] = GetGameTime() + GetRandomFloat(25.0, 45.0);
 		}
-		spot = g_defendPos[g_defendIdx[client] % g_defendCount];
+		spot = g_defendPos[h][g_defendIdx[client] % g_defendCount[h]];
+	}
+	Action climb;
+	if (Stairs_Update(client, bot, me, spot, moveGoal, routeType, climb))
+	{
+		strcopy(g_state[client], sizeof(g_state[]), "taking the stairs");
+		if (climb == Plugin_Continue) g_us_wantMove[client] = false;
+		else Unstick_WantMove(client, me, moveGoal);
+		return climb;
 	}
 	if (GetVectorDistance(me, spot) > 64.0)
 	{
 		moveGoal = spot;
 		routeType = NAVBOT_SAFEST_ROUTE;
+		strcopy(g_state[client], sizeof(g_state[]), "walking to defend spot");
 		return MoveTo(client, moveGoal);
 	}
-	if (GetGameTime() >= g_lookAround[client] && g_openingCount > 0)
+	if (GetGameTime() >= g_lookAround[client])
 	{
+		// Watch one of the home's doors or windows, gun ready.
 		g_lookAround[client] = GetGameTime() + GetRandomFloat(3.0, 5.0);
-		float watch[3];
-		watch = g_openingPos[GetRandomInt(0, g_openingCount - 1)];
-		NavBotPlayerControllerInterface.AimAtPos(bot.GetPlayerControllerInterface(), watch, LOOK_SEARCH, 2.0, "Watching an entrance");
+		int pick[MAX_OPENINGS], n = 0;
+		for (int o = 0; o < g_openingCount; o++)
+			if (g_openingHome[o] == h && FloatAbs(g_openingPos[o][2] - me[2]) < 200.0)
+				pick[n++] = o;
+		if (n > 0)
+		{
+			float watch[3];
+			watch = g_openingPos[pick[GetRandomInt(0, n - 1)]];
+			NavBotPlayerControllerInterface.AimAtPos(bot.GetPlayerControllerInterface(), watch, LOOK_SEARCH, 2.0, "Watching an entrance");
+		}
 	}
+	strcopy(g_state[client], sizeof(g_state[]), "holding defend spot");
 	return Hold(client);
 }
 
@@ -1396,10 +1881,6 @@ Action Timer_Think(Handle timer)
 	if (GetGameTime() - g_roundStart < g_equipTime.FloatValue)
 		return Plugin_Continue;                  // gear-up phase
 	CheckOverrun();
-	if (!g_haveHoldout)
-		ChooseHoldout();
-	if (!g_haveHoldout)
-		return Plugin_Continue;
 
 	for (int client = 1; client <= MaxClients; client++)
 	{
@@ -1409,6 +1890,11 @@ Action Timer_Think(Handle timer)
 			continue;
 		}
 		NavBot bot = NavBotManager.GetNavBotByIndex(client);
+
+		if (g_home[client] == -1)
+			AssignHome(client);
+		if (g_home[client] == -1)
+			continue;
 
 		RefillAmmo(client);
 		HoldBestGun(client, bot);
@@ -1427,7 +1913,7 @@ Action Timer_Think(Handle timer)
 			continue;
 
 		// Hand out barricade jobs.
-		if (g_job[client] == JOB_NONE && CountBarricaders() < g_barricaders.IntValue)
+		if (g_job[client] == JOB_NONE && CountBarricaders(g_home[client]) < g_barricaders.IntValue)
 		{
 			int o = ClaimOpening(client);
 			if (o != -1)
@@ -1469,10 +1955,38 @@ Action Cmd_Status(int args)
 			if (HasGun(i)) armed++;
 		}
 	PrintToServer("[zps24ai] survivor bots with a gun: %d/%d", armed, bots);
-	if (!g_haveHoldout) { PrintToServer("[zps24ai] no hold-out yet"); return Plugin_Handled; }
-	int done = 0;
-	for (int i = 0; i < g_openingCount; i++) if (g_openingDone[i]) done++;
-	PrintToServer("[zps24ai] hold-out %.0f %.0f %.0f, openings %d done %d, barricaders %d", g_holdout[0], g_holdout[1], g_holdout[2], g_openingCount, done, CountBarricaders());
+	if (g_homeCount == 0) { PrintToServer("[zps24ai] no homes yet"); return Plugin_Handled; }
+	for (int h = 0; h < g_homeCount; h++)
+	{
+		int doors = 0, windows = 0, done = 0, defenders = 0;
+		for (int o = 0; o < g_openingCount; o++)
+		{
+			if (g_openingHome[o] != h) continue;
+			if (g_openingWindow[o]) windows++; else doors++;
+			if (g_openingDone[o]) done++;
+		}
+		for (int i = 1; i <= MaxClients; i++)
+			if (g_home[i] == h && IsClientInGame(i) && IsPlayerAlive(i)) defenders++;
+		PrintToServer("[zps24ai] home %d%s at %.0f %.0f %.0f: %d bots, %d doors (%d done), %d windows, %d defend spots (%d upstairs), barricaders %d",
+			h, g_homeValid[h] ? "" : " (abandoned)", g_homePos[h][0], g_homePos[h][1], g_homePos[h][2], defenders, doors, done, windows,
+			g_defendCount[h], g_upperCount[h], CountBarricaders(h));
+		for (int o = 0; o < g_openingCount && args > 0; o++)
+		{
+			if (g_openingHome[o] != h) continue;
+			int e = g_openingEnt[o];
+			char cls[64] = "?";
+			float mins[3], maxs[3];
+			if (IsValidEntity(e))
+			{
+				GetEntityClassname(e, cls, sizeof(cls));
+				GetEntPropVector(e, Prop_Send, "m_vecMins", mins);
+				GetEntPropVector(e, Prop_Send, "m_vecMaxs", maxs);
+			}
+			PrintToServer("    #%d %s %s at %.0f %.0f %.0f size %.0fx%.0fx%.0f mat %d", o, g_openingWindow[o] ? "window" : "door", cls,
+				g_openingPos[o][0], g_openingPos[o][1], g_openingPos[o][2], maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2],
+				IsValidEntity(e) && HasEntProp(e, Prop_Data, "m_Material") ? GetEntProp(e, Prop_Data, "m_Material") : -1);
+		}
+	}
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (g_job[i] != JOB_BARRICADE || !IsClientInGame(i))
@@ -1485,8 +1999,51 @@ Action Cmd_Status(int args)
 		char active[64] = "-";
 		int aw = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
 		if (aw > 0) GetEntityClassname(aw, active, sizeof(active));
-		PrintToServer("  %N -> opening %d boards %d | tool=%d nearest free tool %.0f | to stand %.0f | holding %s | aimtries %d",
+		PrintToServer("  %N -> door %d furniture %d | tool=%d nearest free tool %.0f | to stand %.0f | holding %s | aimtries %d",
 			i, o, g_openingBoards[o], FindOwnedWeapon(i, "weapon_barricade") != -1, fdist, GetVectorDistance(me, stand), active, g_aimTry[i]);
+	}
+	return Plugin_Handled;
+}
+
+
+Action Cmd_Bots(int args)
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsFakeClient(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_SURVIVORS)
+			continue;
+		float me[3];
+		GetClientAbsOrigin(i, me);
+		char task[160] = "-", active[48] = "-";
+		if (NavBotManager.IsNavBot(i))
+			NavBotBehaviorInterface.GetTaskDebugString(NavBotManager.GetNavBotByIndex(i).GetBehaviorInterface(), task, sizeof(task));
+		int aw = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
+		if (aw > 0) GetEntityClassname(aw, active, sizeof(active));
+		PrintToServer("%N at %.0f %.0f %.0f home %d job %d | %s | stuck %.0f s | %s | %s", i, me[0], me[1], me[2], g_home[i], g_job[i],
+			g_state[i], Unstick_StuckFor(i), active, task);
+	}
+	return Plugin_Handled;
+}
+
+Action Cmd_Doors(int args)
+{
+	static const char classes[][] = { "func_door_rotating", "func_door", "prop_door_rotating" };
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int ent = -1;
+		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
+		{
+			float center[3], mins[3], maxs[3], inside[3];
+			EntityCenter(ent, center);
+			GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+			GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+			float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1];
+			float n[3], a[3], b[3];
+			n[0] = sx < sy ? 1.0 : 0.0; n[1] = sx < sy ? 0.0 : 1.0;
+			for (int i = 0; i < 3; i++) { a[i] = center[i] + n[i] * 48.0; b[i] = center[i] - n[i] * 48.0; }
+			PrintToServer("%d %s at %.0f %.0f %.0f size %.0fx%.0fx%.0f headroom %.0f / %.0f exterior %d", ent, classes[c], center[0], center[1], center[2],
+				sx, sy, maxs[2] - mins[2], SpaceAbove(a), SpaceAbove(b), IsExteriorOpening(ent, center, inside));
+		}
 	}
 	return Plugin_Handled;
 }

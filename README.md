@@ -4,9 +4,12 @@ Bots for **Zombie Panic! Source 2.4**, the classic version Steam still offers as
 beta. Run a small Linux server on your own PC, fill it with bots, and play survivors vs. zombies
 against them from your normal ZPS 2.4 game.
 
-- **Survivor bots** head upstairs (upper floors, roofs, balconies), push furniture into the
-  ground-floor doors and windows, and shoot zombies from a safe distance, falling back when one
-  gets close.
+- **Survivor bots** defend the house they spawn in: they head upstairs (upper floors, roofs,
+  balconies), shove furniture into the ground-floor doors with bare hands, keep back from windows,
+  and shoot zombies from a safe distance, falling back when one gets close. They never break
+  windows, doors or barricades.
+- **Bots learn from you:** while you play, they record your hold-out spots, the routes you take
+  between floors and the distances you fight at, and copy them.
 - **Zombie bots** hunt survivors down, follow them upstairs and smash through anything breakable.
 - Bots on both teams, including the Carrier. Up to 24 players and bots.
 - An **admin menu** (M) to add or remove bots, set their skill, change maps and spawn items, and a

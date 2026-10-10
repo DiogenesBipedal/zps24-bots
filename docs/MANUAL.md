@@ -1240,6 +1240,190 @@ floor within 75 seconds, and the survivor dead 4 seconds after being unpinned.
 - Debug output can lie too: an early version of the test script read the wrong columns and
   reported zero zombies in the tower. Sanity-check your measurements.
 
+### 11.6 Playing like a human: hands, windows and the house you spawn in
+
+**The complaints.**
+- Barricading bots bumped into furniture until it happened to slide into place.
+- Bots stood at windows and shot the glass out.
+- The whole team ran across the map to one "best" building instead of defending where they were.
+
+**Finding the right tool: bare hands.** A ZPS player who wants to move furniture presses H for
+bare hands and right-clicks to shove it. Could bots do the same? The server binary has symbols,
+so `nm -C server_i486.so | grep CWeaponEmptyHand` answers it:
+
+```
+CWeaponEmptyHand::SecondaryAttack()
+CWeaponEmptyHand::PuntVPhysics(CBaseEntity*, Vector const&, CGameTrace&)
+```
+
+The secondary attack "punts" physics objects along the aim direction, which is exactly the
+shove. (`weapon_arms` is the zombies' version.) So a bot does what a player does:
+
+1. `use weapon_emptyhand` (what H does);
+2. aim at the furniture;
+3. press attack 2 (right click).
+
+**Pushing something somewhere.** A shove goes where you're looking, so to push a cabinet toward
+a door you stand on the far side of it. The bot's spot is on the line from the door through the
+furniture, 50 units behind it, snapped to the nav mesh. It shoves, the furniture slides, and it
+re-computes the spot and walks behind it again. Two details make this robust:
+- **Measure progress, not effort.** The bot keeps the closest distance the furniture has been to
+  the door. Six shoves without getting it 8 units closer mean it's too heavy or wedged, so the
+  bot blacklists it and picks another piece.
+- **Only furniture on the right side.** A dot product with the door's "inside" vector
+  (`(prop - door) . inside >= 0`) keeps bots from pushing a bench from the porch into the
+  outside of the door.
+
+**Testing showed two more problems**, both visible in a per-shove log line ("furniture 144 is 93
+from door 1"):
+- **Bots shoved from too far away.** Bare hands reach about 70 units from the eyes. When the
+  spot behind the furniture was off the nav mesh, the bot shoved from wherever it stood,
+  sometimes 280 units away. Now it steps in (`MoveTowards`) until the furniture is in reach.
+- **The punt is weak.** Light props slid; cabinets barely moved. Since the player's request was
+  to "bump furniture harder", each shove that lands within reach also gives the prop a push
+  0.25 s later, as the hands connect. `TeleportEntity(prop, NULL_VECTOR, NULL_VECTOR, velocity)`
+  sets a physics prop's velocity: 220 units/s toward the door, with a little lift so it slides
+  instead of digging into the floor.
+
+The same shove clears the way when walking. NavBot reports what blocks a bot's path through the
+`OnNavBotObstacleOnPath` forward (see 11.3). For a loose prop, the bot now shoves it about 20
+degrees off its path, so it lands beside the route rather than further along it. Furniture that
+is already blocking a door, and barricade boards (any model with `barricade` in its name), are
+never shoved.
+
+**Windows: hold back and wait.** The fix has three parts:
+- **Classify every opening.** Doors are door entities, plus wooden `func_breakable`s of door
+  height (the church's main doors). Everything else (`func_breakable_surf`, glass
+  `func_breakable`) is a window.
+- **Keep defend spots away from windows.** Any nav area within 150 units of a window gets a
+  score penalty so large it is never picked. Retreat spots within 100 units of one are skipped.
+  Furniture only goes into doors.
+- **Never shoot through intact glass.** `ClearShot()` traces from the bot's eye to the zombie.
+  Anything other than the zombie, the world or a shattered window (`m_bIsBroken`) blocks the
+  shot. So a bot watches the window, lets the zombie break in, and shoots it as it climbs
+  through. The same check now guards the "I've been hit" reaction (11.4), which used to fire
+  blindly at the attacker, sometimes through a door or barricade.
+
+**Defend the house you spawn in.** The old code picked one building for the whole team: the
+densest cluster of doors and windows on the map. Now:
+- **Remember the spawn.** `player_spawn` records where each survivor bot spawned (after a
+  0.2 s timer, because the position isn't final yet when the event fires).
+- **Find the house.** The exterior door or window nearest that point, plus every one within
+  `sm_zps24ai_holdout_radius` of it, is the bot's **home**.
+- **Share the home.** Bots that spawn in the same house find the same home, because a new home
+  is only made when no existing one is within the radius. Up to four homes at once. Each home
+  has its own defend spots, doors and barricaders.
+- **Overrun:** if three bots die at a home and three zombies are inside it, it's marked bad and
+  its bots move to the house nearest to where they are.
+
+**A bug the test found at once.** On the cabin map one bot's home got a single defend spot.
+`sm_navreach` from its position showed why: it stood on a two-area island of nav mesh with no
+connection to the rest of the map. Searching outward from there found nothing. The fix: if the
+search from the spawn finds fewer than 12 areas, the home is centered on its doors and windows
+instead. Same house, 22 defend spots.
+
+**Which doors lead outside?** Openings are found by headroom. Just beside an outside door, one
+side has a roof (less than 400 units of space above) and the other has sky. The first test round
+on the cabin found only 3 outside doors on the whole map. `sm_zps24ai_doors` lists every door
+with its headroom on both sides and showed `73 / 73` for many of them: porches, roofed on both
+sides at 48 units out. Doors now also sample 128 and 208 units out, and count as outside doors
+when only one side reaches open sky. Doors inside a house stay roofed on both sides and are
+still left out. `sm_zps24ai_status all` lists every home's doors and windows, so the
+classification can be checked on any map.
+
+**"Some bots are just standing."** During testing, survivors stood frozen. A new console command,
+`sm_zps24ai_bots`, prints each bot's last decision ("walking to defend spot", "shoving
+furniture aside"...) next to NavBot's task. The frozen bots showed NavBot's task as
+`ScriptedBehavior` and an empty decision: the plugin's update function was never being called.
+The cause was my own plugin reloads while testing:
+
+- **The task outlives the plugin.** A scripted task holds a SourceMod forward with one function
+  in it, the plugin's `OnScriptedUpdate`. When the plugin unloads, SourceMod removes that
+  function from every forward. The task keeps running and calls an empty forward every frame.
+  The result defaults to `Plugin_Continue`, which means "stand still, don't path".
+- **Stopping it didn't work either.** The reloaded plugin sees a scripted task already running
+  and sends the stop command, but the task never ended.
+
+The fix is in NavBot (`patches/navbot-zps24.patch`). At the top of the task's update:
+
+```cpp
+if (m_updatecallback->GetFunctionCount() == 0)
+    return AITask<BotClass>::Done("Scripted callback's plugin was unloaded!");
+```
+
+The task ends by itself, the bot falls back to its normal behavior, and the reloaded plugin
+hands it a fresh scripted task on its next tick. Tested by reloading the plugin mid-round: every
+bot was steered again within seconds.
+
+**Lessons.**
+- Give your AI a way to say what it's thinking (`sm_zps24ai_bots`). "Standing still" has a
+  dozen causes, and one line per bot tells them apart.
+- Anything that holds a callback into a plugin must handle that plugin going away.
+
+### 11.7 Learning from the main player
+
+**The request.** "Follow me and learn from my survival and waypoint movement skills, and follow
+only me." Rather than guessing good hold spots and routes from map geometry, the bots copy
+what the player does. This is *learning from demonstration*: no neural network, just careful
+recording of the right events, and using them where the hand-written rules used to guess.
+
+**Who to learn from.** `zps24_learn.sp` watches only the *teacher*: a player with admin rights
+(the host is admin by IP, set up by `zps24_admin`), or whoever `sm_zps24learn_teacher` names.
+Learning from everyone would mix good habits with bad ones.
+
+**What gets recorded** (every 0.25 s while the teacher is alive):
+
+1. **Hold spots.** An "anchor" is the spot where the player stopped. Moving more than 80 units
+   away ends it, and if they stayed 10 seconds or more it becomes a hold spot. Seconds
+   accumulate per spot, so places held often and long rank highest. Dying there counts a
+   quarter: the spot was held, but it didn't save them.
+2. **Routes.** This generalizes the hand-made stair routes from 11.5:
+   - **Start:** while the player stands on the nav mesh (`GetNearestNavArea`, then
+     `GetClosestPointOnArea` within 12 units and at the right height), remember the spot.
+   - **Off the mesh:** when they leave it, record their path every 24 units of movement on the
+     ground.
+   - **Save:** when they're back on the mesh on a different floor (48+ units higher or lower),
+     the path from the last on-mesh point to the first on-mesh point is a route.
+   - **Discard:** paths with a ladder or noclip, or longer than 15 s off the mesh.
+   - **Repeats:** the same route taken again (both ends within 64 units) just adds a use.
+3. **Fighting distances.** The distance to the nearest zombie at the moment the player starts
+   firing a gun, and at the moment they start moving away from it (velocity pointing away at
+   more than 0.7 of their speed, within 600 units). Only the *start* of each action counts, so
+   holding the trigger for three seconds is one sample, not twelve.
+
+The file is a KeyValues text file per map in `data/zps24_learn/`, readable and editable by hand.
+
+**How the bots use it** (`include/zps24_learned.inc`, loaded at map and round start):
+- **Hold spots:** survivor homes put the player's spots in the house first, most-held first,
+  ahead of the computed upstairs and corner spots. Bots spread over the best four or more
+  instead of piling onto one.
+- **Routes:** they join the hand-made stair routes in `zps24_stairs.inc`, with a general rule
+  for picking one. A route qualifies if:
+  - its start is on the bot's floor and within 1200 units;
+  - its end is at least 40 units closer in height to where the bot wants to be;
+  - its end is within 1500 units of that place.
+
+  The cheapest one wins (distance to its start, half the distance from its end, plus the
+  height left over). Zombies use them to chase, and survivors use them to reach their defend
+  spot, which also gives survivors the church tower's hand-made stair routes at last.
+- **Fighting distances:** with 20+ shooting samples, the engage range becomes the player's
+  average plus 15% (kept within 250 to 1200 units). With 10+ back-off samples, the safe
+  distance becomes the player's average (120 to 500).
+
+**Lessons.**
+- Learning from demonstration is mostly deciding which *moments* matter: the start of an action,
+  the end of a stay, the points where the player did something the map data can't explain.
+- Learn from one trusted teacher, and weight the outcome (time survived, death) into what you
+  keep.
+- Keep learned data in a plain text file: you can read it, fix a bad lesson by hand, or wipe it
+  (`sm_zps24learn_forget`).
+- Before building a workaround, look for the game's own mechanism (here, the hands' punt). A
+  bot that plays with the player's controls looks human, and the game's physics does the work.
+- Make every repeated action check its own progress, and give up after a few tries.
+- "Don't do X" rules need a check right where the action happens, not just a general tendency.
+  The "never shoot glass" rule lives in the line-of-fire trace, so every place that fires obeys
+  it.
+
 ---
 
 ## 12. The tricks, collected
@@ -1282,6 +1466,13 @@ floor within 75 seconds, and the survivor dead 4 seconds after being unpinned.
 26. After changing generation settings, measure reachability across the whole map.
 27. If the pathfinder can't express a route, steer the bot yourself (`MoveTowards`) and hand it
     back to the pathfinder at the end.
+28. Let bots use the player's controls (`use weapon_emptyhand`, attack 2) and the game's own
+    physics, instead of moving things for them.
+29. Track progress toward the goal, not the number of attempts, and blacklist what doesn't move.
+30. Put "never do X" rules in the one check every action goes through (here, `ClearShot()`).
+31. Give the AI a "what am I doing" readout (`sm_zps24ai_bots`) before debugging behavior.
+32. To teach bots, record the moments that matter from one trusted player, and keep it as
+    editable text.
 
 ---
 
@@ -1325,7 +1516,11 @@ Each builds on something in this repo.
 | Dead end | Here: a goal area a zombie reached without being able to see its target; avoided for 20 s. |
 | Hold-out | The building survivor bots choose to defend. |
 | `MoveTowards` | NavBot native that walks a bot straight at a point, with no pathfinding. |
+| Learning from demonstration | Teaching an AI by recording what a skilled player does and reusing it. |
+| Home | The house a survivor bot defends: the doors and windows around where it spawned. |
+| Nav island | Nav areas with no connection to the rest of the mesh; a search started there finds almost nothing. |
 | Nav mesh | A map of walkable areas that bots use to find paths. |
+| Punt | Source's word for shoving a physics object; ZPS's bare hands do it on right click. |
 | Scripted plugin command | NavBot task that calls a plugin function every update to get the bot's move goal. |
 | Stair route | A hand-made list of points that walks bots up a staircase the nav mesh doesn't cover. |
 | Offset | Here: a vtable slot number. |

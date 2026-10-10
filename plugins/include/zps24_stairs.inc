@@ -16,13 +16,16 @@
 #endif
 #define _zps24_stairs_included
 
-#define STAIRS_MAX_ROUTES  4
-#define STAIRS_MAX_POINTS  6
+#include "include/zps24_learned.inc"
+
+#define STAIRS_MAX_ROUTES  20                   // 4 hand-made + learned from humans
+#define STAIRS_MAX_POINTS  12
 
 int   g_st_routeCount;
 int   g_st_pointCount[STAIRS_MAX_ROUTES];
 float g_st_points[STAIRS_MAX_ROUTES][STAIRS_MAX_POINTS][3];
-int   g_st_lower[STAIRS_MAX_ROUTES];          // floor the route starts on (points[0])
+int   g_st_lower[STAIRS_MAX_ROUTES];          // floor the route starts on (points[0]); -1 = learned
+int   g_st_handMade;                          // routes before this index are hand-made
 float g_st_floorZ[8];                         // floor heights of the building, lowest first
 int   g_st_floorCount;
 float g_st_boxMin[3], g_st_boxMax[3];         // the building
@@ -79,6 +82,66 @@ void Stairs_OnMapStart()
 		Stairs_AddPoint(1, -1140.0, 385.0, 256.0);
 		g_st_routeCount = 2;
 	}
+	g_st_handMade = g_st_routeCount;
+	Learned_Load();
+	Stairs_AddLearned();
+}
+
+// Pick up what the bots learned since the map started (call at round start).
+void Stairs_Relearn()
+{
+	Learned_Load();
+	Stairs_AddLearned();
+}
+
+// Add the routes learned from human players (zps24_learn) for this map. Call after
+// Learned_Load(); safe to call again (it replaces the learned ones).
+void Stairs_AddLearned()
+{
+	g_st_routeCount = g_st_handMade;
+	for (int i = g_st_handMade; i < STAIRS_MAX_ROUTES; i++)
+		g_st_pointCount[i] = 0;
+	for (int l = 0; l < g_ln_routeCount && g_st_routeCount < STAIRS_MAX_ROUTES; l++)
+	{
+		int r = g_st_routeCount++;
+		g_st_lower[r] = -1;
+		for (int i = 0; i < g_ln_routeLen[l] && i < STAIRS_MAX_POINTS; i++)
+			Stairs_AddPoint(r, g_ln_routes[l][i][0], g_ln_routes[l][i][1], g_ln_routes[l][i][2]);
+	}
+}
+
+// A learned route that takes the bot toward the target's floor: it must start on the bot's floor,
+// not too far away, and end closer in height to the target. Returns the route or -1.
+int Stairs_LearnedFor(const float me[3], const float target[3], int &step)
+{
+	float dzNow = FloatAbs(me[2] - target[2]);
+	if (dzNow < 60.0)
+		return -1;
+	int best = -1;
+	float bestCost = 999999.0;
+	for (int r = g_st_handMade; r < g_st_routeCount; r++)
+	{
+		int last = g_st_pointCount[r] - 1;
+		for (int dir = 0; dir < 2; dir++)
+		{
+			float start[3], end[3];
+			start = g_st_points[r][dir == 0 ? 0 : last];
+			end = g_st_points[r][dir == 0 ? last : 0];
+			if (FloatAbs(me[2] - start[2]) > 40.0 || FloatAbs(end[2] - target[2]) > dzNow - 40.0)
+				continue;
+			float toStart = Stairs_Dist2D(me, start), toTarget = Stairs_Dist2D(end, target);
+			if (toStart > 1200.0 || toTarget > 1500.0)
+				continue;
+			float cost = toStart + toTarget * 0.5 + FloatAbs(end[2] - target[2]);
+			if (cost < bestCost)
+			{
+				bestCost = cost;
+				best = r;
+				step = dir == 0 ? 1 : -1;
+			}
+		}
+	}
+	return best;
 }
 
 // Floor index of a position inside the building, or -1 outside it.
@@ -107,6 +170,7 @@ int Stairs_RouteFor(int from, int to, int &step)
 {
 	for (int r = 0; r < g_st_routeCount; r++)
 	{
+		if (g_st_lower[r] < 0) continue;
 		if (to > from && g_st_lower[r] == from) { step = 1; return r; }
 		if (to < from && g_st_lower[r] == from - 1) { step = -1; return r; }
 	}
@@ -163,17 +227,21 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 	if (GetGameTime() < g_st_cooldown[client])
 		return false;
 
-	// Need a different floor of the building?
+	// Need a different floor of the building (hand-made routes), or another floor anywhere a
+	// human showed the way (learned routes)?
+	int step;
+	r = -1;
 	int tl = Stairs_Level(target);
 	int ml = Stairs_Level(me);
-	if (tl == -1 && ml == -1)
-		return false;
-	int from = ml == -1 ? 0 : ml;                    // outside: enter on the ground floor
-	int to = tl == -1 ? 0 : tl;                      // target outside: leave by the ground floor
-	if (from == to)
-		return false;
-	int step;
-	r = Stairs_RouteFor(from, to, step);
+	if (tl != -1 || ml != -1)
+	{
+		int from = ml == -1 ? 0 : ml;                // outside: enter on the ground floor
+		int to = tl == -1 ? 0 : tl;                  // target outside: leave by the ground floor
+		if (from != to)
+			r = Stairs_RouteFor(from, to, step);
+	}
+	if (r == -1)
+		r = Stairs_LearnedFor(me, target, step);
 	if (r == -1)
 		return false;
 

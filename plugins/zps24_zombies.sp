@@ -47,6 +47,12 @@ public void OnPluginStart()
 	g_debug  = CreateConVar("sm_zps24zombies_debug", "0", "Log zombie AI decisions");
 	g_forceTarget = CreateConVar("sm_zps24zombies_force_target", "0", "Debug: every zombie hunts this client index (0 = normal)");
 	AutoExecConfig(true, "zps24_zombies");
+	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
+}
+
+void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
+{
+	Stairs_Relearn();
 }
 
 public void OnMapStart()

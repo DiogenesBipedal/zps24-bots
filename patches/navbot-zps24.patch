@@ -90,6 +90,24 @@ index 8e917c2..9e9a0e4 100644
  
  	SnapAimAt(lookAngles, priority);
  }
+diff --git a/extension/bot/tasks_shared/bot_shared_plugin_command_tasks.h b/extension/bot/tasks_shared/bot_shared_plugin_command_tasks.h
+index b49b90d..1be39ab 100644
+--- a/extension/bot/tasks_shared/bot_shared_plugin_command_tasks.h
++++ b/extension/bot/tasks_shared/bot_shared_plugin_command_tasks.h
+@@ -81,6 +81,13 @@ public:
+ 		cell_t result = static_cast<cell_t>(SourceMod::ResultType::Pl_Continue);
+ 		cell_t routetype = static_cast<cell_t>(RouteType::DEFAULT_ROUTE);
+ 
++		// The plugin that owns the callback was unloaded or reloaded: SourceMod removed its
++		// function, so nothing would ever steer or stop this task again. End it.
++		if (m_updatecallback->GetFunctionCount() == 0)
++		{
++			return AITask<BotClass>::Done("Scripted callback's plugin was unloaded!");
++		}
++
+ 		m_updatecallback->PushCell(bot->GetIndex());
+ 		m_updatecallback->PushArray(arrgoal.data(), 3, SM_PARAM_COPYBACK);
+ 		m_updatecallback->PushCellByRef(&routetype);
 diff --git a/extension/extension.cpp b/extension/extension.cpp
 index 5ce290b..491af0b 100644
 --- a/extension/extension.cpp

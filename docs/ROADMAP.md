@@ -4,8 +4,8 @@ Where the project is (v0.1) and what's next. Nothing here has a date.
 
 ## Known issues
 
-- **Barricading uses furniture only.** Survivor bots push furniture into the ground-floor doors
-  and windows. The barricade hammer is off: ZPS 2.4's carry-weight limit stops armed bots from
+- **Barricading uses furniture only.** Survivor bots shove furniture into the ground-floor doors
+  with bare hands (windows are left alone: bots keep back from them and shoot what climbs in). The barricade hammer is off: ZPS 2.4's carry-weight limit stops armed bots from
   picking it up. The options are raising the limit (the weight is a float at `CHuman+0x28`; the
   limit check is somewhere in the pickup path) or keeping barricaders lightly armed.
 - **Steep staircases.** NavBot's generator leaves out stairs steeper than about 45 degrees (it
@@ -19,8 +19,6 @@ Where the project is (v0.1) and what's next. Nothing here has a date.
 - **Chat gibberish.** Some bots occasionally put random text in chat without going through the
   `say` command. `ZPS24_GDB=1` mode sets a `Host_Say` breakpoint to catch where it comes from.
 - **Crash on shutdown.** Harmless, but noisy.
-- **Plugin reloads during development** leave stale NavBot tasks behind; change map after reloading
-  the AI plugins.
 
 ## Next
 

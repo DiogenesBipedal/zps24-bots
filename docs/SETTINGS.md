@@ -26,14 +26,39 @@ Set these in `~/zps24-server/zps/cfg/server.cfg` (loaded on every map) or change
 | `sm_zps24ai_engage_range` | 700 | Distance at which bots aim at and shoot visible zombies |
 | `sm_zps24ai_safe_distance` | 260 | Bots stand and shoot until a zombie is this close, then fall back (upstairs when there is one) |
 | `sm_zps24ai_upper_height` | 80 | How much higher a spot must be to count as an upper floor, roof or balcony |
-| `sm_zps24ai_barricaders` | 2 | How many bots barricade the ground floor at once (0 = off) |
-| `sm_zps24ai_boards` | 3 | Boards per door or window when barricading |
-| `sm_zps24ai_holdout_radius` | 550 | Doors and windows within this distance of the hold-out get barricaded |
-| `sm_zps24ai_need_tool` | 0 | 1 = barricaders fetch the barricade hammer (unfinished); 0 = they push furniture into doors and windows |
-| `sm_zps24ai_furniture` | 1 | Barricaders without a hammer push furniture into openings |
+| `sm_zps24ai_barricaders` | 2 | How many bots per house barricade its ground-floor doors at once (0 = off) |
+| `sm_zps24ai_boards` | 3 | Pieces of furniture (or boards) per door |
+| `sm_zps24ai_holdout_radius` | 550 | Size of a house: doors and windows within this distance of the one nearest a bot's spawn belong to its home |
+| `sm_zps24ai_need_tool` | 0 | 1 = barricaders fetch the barricade hammer (unfinished); 0 = they shove furniture into doors |
+| `sm_zps24ai_furniture` | 1 | Barricaders without a hammer shove furniture into doors (bare hands, right click) |
+| `sm_zps24ai_learned_style` | 1 | Fight at the distances learned from the main player (below) once there are enough samples, instead of `engage_range` and `safe_distance` |
 | `sm_zps24ai_debug` | 0 | Log survivor AI decisions to the server console |
 
 Distances are in game units (a player is about 72 units tall).
+
+## Learning from the main player (zps24_learn)
+
+The bots watch one player, the host (server admins), and copy them. Per map, saved in
+`addons/sourcemod/data/zps24_learn/<map>.cfg`:
+
+- **Hold spots:** where you stay put for 10+ seconds as a survivor. Survivor bots defend from
+  them first in whichever house they're in. Spots where you died count for less.
+- **Routes:** paths you take between floors where the bots' nav mesh has no areas (steep
+  stairs, jumps, climbs). Both teams walk them. Recorded on either team; ladders and noclip
+  don't count.
+- **Fighting distances:** how far the nearest zombie is when you open fire, and when you start
+  backing away. Survivor bots copy them after 20 and 10 samples.
+
+The bots pick up new lessons at the next round.
+
+| Setting / command | Default | What it does |
+|---|---|---|
+| `sm_zps24learn_enable` | 1 | Learn from the main player |
+| `sm_zps24learn_teacher` | (empty) | Learn only from the player whose name contains this; empty = server admins |
+| `sm_zps24learn_hold_time` | 10 | Seconds you must stay put for a hold spot |
+| `sm_zps24learn_debug` | 1 | Log each lesson to the SourceMod log |
+| `sm_zps24learn_status` | | What has been learned on this map |
+| `sm_zps24learn_forget` | | Forget this map's lessons |
 
 ## Zombie bots (zps24_zombies)
 
@@ -87,6 +112,16 @@ Stations and tracks are listed in `addons/sourcemod/configs/zps24_radio.cfg`, wh
 | Setting | Default | What it does |
 |---|---|---|
 | `sm_botprobe_interval` | 0 | Seconds between bot state logs in the server console (0 = off) |
+
+## Survivor AI inspection (zps24_survivors)
+
+Server console / RCON only.
+
+| Command | What it does |
+|---|---|
+| `sm_zps24ai_status [all]` | Each home (the house a group of bots defends): bots, doors, windows, defend spots, barricaders. With `all`, every door and window too |
+| `sm_zps24ai_bots` | What each survivor bot is doing right now, how long it has been stuck, its weapon and NavBot task |
+| `sm_zps24ai_doors` | Every door on the map with its headroom on both sides, and whether it counts as an outside door |
 
 ## Nav mesh tools (zps24_navdebug)
 
