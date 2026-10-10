@@ -89,6 +89,7 @@ int   g_brComp[BR_MAX][2];             // nav region of each side
 bool  g_brClimb[BR_MAX];               // the opening's bottom is above the floor: jump through
 float g_brStart[BR_MAX][3];            // where the blocker was at map start
 bool  g_brTough[BR_MAX];               // nobody got through this round
+bool  g_brOpen[BR_MAX];                // cleared and linked into the nav mesh
 
 // Nav regions: areas connected to each other. Zombies use them to tell when a survivor is in a
 // part of the map they can't walk to (behind a plank, a barred door, a window).
@@ -1456,6 +1457,37 @@ Address SideArea(const float center[3], const float n[3], float sign, float poin
 	return Address_Null;
 }
 
+// Openings that got cleared (a plank knocked off, a bar removed and the door opened): link the
+// nav areas through them so every zombie paths through, not just the one that broke it.
+// Windows still need a climb, which path following can't do: those stay with the break-in code.
+void LinkClearedOpenings()
+{
+	bool changed = false;
+	for (int k = 0; k < g_brCount; k++)
+	{
+		if (g_brOpen[k] || g_brClimb[k] || g_brKind[k] == BR_WINDOW || !BlockerGone(k))
+			continue;
+		g_brOpen[k] = true;
+		Address a = NavBotNavMesh.GetNearestNavArea(g_brSide[k][0], 40.0, false, true);
+		Address b = NavBotNavMesh.GetNearestNavArea(g_brSide[k][1], 40.0, false, true);
+		if (a == Address_Null || b == Address_Null || a == b)
+			continue;
+		if (!NavBotNavArea.IsConnectedToAny(a, b)) NavBotNavArea.ConnectToAdjacent(a, b);
+		if (!NavBotNavArea.IsConnectedToAny(b, a)) NavBotNavArea.ConnectToAdjacent(b, a);
+		changed = true;
+		Debug("Opening at %.0f %.0f %.0f is clear: linked for the horde", g_brStart[k][0], g_brStart[k][1], g_brStart[k][2]);
+	}
+	if (changed)
+	{
+		LabelRegions();
+		for (int k = 0; k < g_brCount; k++)
+		{
+			g_brComp[k][0] = AreaComp(NavBotNavMesh.GetNearestNavArea(g_brSide[k][0], 40.0, false, true));
+			g_brComp[k][1] = AreaComp(NavBotNavMesh.GetNearestNavArea(g_brSide[k][1], 40.0, false, true));
+		}
+	}
+}
+
 // Scan every door, plank and window: link plain doors, record the rest as openings to break.
 int LinkDoors(bool verbose)
 {
@@ -1537,6 +1569,7 @@ int LinkDoors(bool verbose)
 			g_brClimb[k] = !isDoor && bottom - floorZ > 14.0;
 			g_brStart[k] = center;
 			g_brTough[k] = false;
+			g_brOpen[k] = false;
 			if (verbose)
 				PrintToServer("[doorlinks] %s %d at %.0f %.0f %.0f: areas #%d | #%d, to break through%s",
 					isDoor ? "barred door" : (isPlank ? "plank" : "window"), ent, center[0], center[1], center[2],
@@ -1606,6 +1639,12 @@ Action Timer_Think(Handle timer)
 	}
 
 	AssignPlacements();
+	static float nextOpenCheck;
+	if (g_doorsLinked && GetGameTime() >= nextOpenCheck)
+	{
+		nextOpenCheck = GetGameTime() + 2.0;
+		LinkClearedOpenings();
+	}
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		if (!IsClientInGame(client) || !IsPlayerAlive(client) || GetClientTeam(client) != TEAM_ZOMBIES || !NavBotManager.IsNavBot(client))
