@@ -43,7 +43,8 @@ float g_lastOnMesh[MAXPLAYERS + 1][3];
 int   g_trailLen[MAXPLAYERS + 1];
 float g_trail[MAXPLAYERS + 1][64][3];        // off-mesh path being recorded
 float g_trailSince[MAXPLAYERS + 1];
-bool  g_trailBad[MAXPLAYERS + 1];            // ladder or noclip on the way: not walkable by bots
+bool  g_trailBad[MAXPLAYERS + 1];            // ladder, noclip, hook or teleport on the way: not walkable by bots
+float g_prevPos[MAXPLAYERS + 1][3];          // position last tick (spots teleports and the grappling hook)
 bool  g_wasShooting[MAXPLAYERS + 1];
 float g_lastOutside[MAXPLAYERS + 1][3];      // as a zombie: last spot outdoors, on the ground
 float g_lastOutsideAt[MAXPLAYERS + 1];
@@ -174,6 +175,8 @@ void EndTrail(int client, const float pos[3])
 		pts[count++] = g_trail[client][k];
 	}
 	pts[count++] = pos;
+	if (!Learned_RouteWalkable(pts, count))
+		return;                              // a gap no player can walk or jump
 
 	// Same route as one we know (both ends close): count the use, keep the old one.
 	for (int r = 0; r < g_ln_routeCount; r++)
@@ -387,6 +390,11 @@ Action Timer_Watch(Handle timer)
 		MoveType mt = GetEntityMoveType(client);
 		float pos[3];
 		GetClientAbsOrigin(client, pos);
+		// Faster than any run or jump (grappling hook, teleport, respawn): not a route to learn.
+		bool flew = GetVectorDistance(pos, g_prevPos[client]) > 300.0;
+		g_prevPos[client] = pos;
+		if (flew && g_inTrail[client])
+			g_trailBad[client] = true;
 
 		// Ways into buildings (as a zombie)
 		if (!survivor && (GetEntityFlags(client) & FL_ONGROUND))

@@ -44,6 +44,18 @@ int   g_ln_entryUses[LEARN_MAX_ENTRIES];
 float g_ln_shootSum, g_ln_retreatSum;        // sums of distances to the nearest zombie
 int   g_ln_shootN, g_ln_retreatN;
 
+// Every step of a route must be walkable or jumpable: no two points more than 200 units apart.
+stock bool Learned_RouteWalkable(const float[][] pts, int n)
+{
+	for (int i = 1; i < n; i++)
+	{
+		float dx = pts[i][0] - pts[i - 1][0], dy = pts[i][1] - pts[i - 1][1];
+		if (dx * dx + dy * dy > 200.0 * 200.0)
+			return false;
+	}
+	return true;
+}
+
 void Learned_Path(char[] path, int maxlen)
 {
 	char map[64];
@@ -101,7 +113,7 @@ void Learned_Load()
 				g_ln_routes[r][i] = v;
 				g_ln_routeLen[r]++;
 			}
-			if (g_ln_routeLen[r] >= 2)
+			if (g_ln_routeLen[r] >= 2 && Learned_RouteWalkable(g_ln_routes[r], g_ln_routeLen[r]))
 				g_ln_routeCount++;
 		} while (kv.GotoNextKey());
 	}
