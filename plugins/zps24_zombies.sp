@@ -57,6 +57,9 @@ float  g_entrySmashUntil[MAXPLAYERS + 1];
 float  g_entryClearAt[MAXPLAYERS + 1];   // when the window was found broken
 float  g_doorsOnlyUntil[MAXPLAYERS + 1]; // a window took too long: break in through a door instead
 int    g_br[MAXPLAYERS + 1] = { -1, ... };   // opening this zombie is breaking through, or -1
+int    g_brLast[MAXPLAYERS + 1] = { -1, ... };
+int    g_brRepeats[MAXPLAYERS + 1];
+float  g_brLastAt[MAXPLAYERS + 1];
 int    g_brFrom[MAXPLAYERS + 1];         // which side of it we're on (0/1)
 int    g_brPhase[MAXPLAYERS + 1];        // 0 walk up to it, 1 break it, 2 go through
 float  g_brUntil[MAXPLAYERS + 1];
@@ -499,6 +502,22 @@ int UpdateBreach(int client, NavBot bot, const float me[3], int target, float mo
 			g_brCooldown[client] = GetGameTime() + 5.0;
 			return ENTRY_NONE;
 		}
+		// The same opening again and again: we're not really getting through it. Give it up.
+		if (k == g_brLast[client] && GetGameTime() - g_brLastAt[client] < 60.0)
+		{
+			if (++g_brRepeats[client] >= 3)
+			{
+				g_brTough[k] = true;
+				g_br[client] = -1;
+				g_brRepeats[client] = 0;
+				Debug("%N: keeps failing the opening at %.0f %.0f %.0f, giving up on it", client, g_brStart[k][0], g_brStart[k][1], g_brStart[k][2]);
+				return ENTRY_NONE;
+			}
+		}
+		else
+			g_brRepeats[client] = 0;
+		g_brLast[client] = k;
+		g_brLastAt[client] = GetGameTime();
 		g_brPhase[client] = 0;
 		g_brUntil[client] = GetGameTime() + 40.0;
 		Debug("%N breaks through a %s at %.0f %.0f %.0f to reach %N", client,
@@ -579,14 +598,14 @@ int UpdateBreach(int client, NavBot bot, const float me[3], int target, float mo
 	}
 	// Phase 2: through the opening, climbing if it's a window or a boarded window. Past most of
 	// the way across counts: then go and hunt.
+	// Through = 16+ units past the opening itself (its center), toward the far side.
 	float dir[3], rel[3];
 	SubtractVectors(g_brSide[k][to], g_brSide[k][from], dir);
 	dir[2] = 0.0;
-	float len = GetVectorLength(dir);
 	NormalizeVector(dir, dir);
-	SubtractVectors(me, g_brSide[k][from], rel);
+	SubtractVectors(me, g_brStart[k], rel);
 	rel[2] = 0.0;
-	if (GetVectorDistance(me, g_brSide[k][to]) < 40.0 || (len > 0.0 && GetVectorDotProduct(rel, dir) > len * 0.6))
+	if (GetVectorDistance(me, g_brSide[k][to]) < 40.0 || GetVectorDotProduct(rel, dir) > 16.0)
 	{
 		g_br[client] = -1;
 		g_brCooldown[client] = GetGameTime() + 2.0;
@@ -736,14 +755,21 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 	{
 		// Through? Past most of the way from the outside point to the inside point (on the sill
 		// or just inside counts): stop climbing and go hunting.
-		float dir[3], rel[3];
+		float dir[3], rel[3], plane[3];
 		SubtractVectors(g_entryIn[client], g_entryOut[client], dir);
 		dir[2] = 0.0;
 		float len = GetVectorLength(dir);
 		NormalizeVector(dir, dir);
-		SubtractVectors(me, g_entryOut[client], rel);
+		int went = EntRefToEntIndex(g_entryEnt[client]);
+		if (went != INVALID_ENT_REFERENCE && IsValidEntity(went))
+			CenterOf(went, plane);           // 16+ units past the window or door itself
+		else
+		{
+			for (int i = 0; i < 3; i++) plane[i] = g_entryOut[client][i] + (g_entryIn[client][i] - g_entryOut[client][i]) * 0.6;
+		}
+		SubtractVectors(me, plane, rel);
 		rel[2] = 0.0;
-		bool through = len > 0.0 && GetVectorDotProduct(rel, dir) > len * 0.6;
+		bool through = len > 0.0 && GetVectorDotProduct(rel, dir) > 16.0;
 		if (through || GetVectorDistance(me, g_entryIn[client]) < 40.0)
 		{
 			g_entryInUntil[client] = 0.0;   // inside
