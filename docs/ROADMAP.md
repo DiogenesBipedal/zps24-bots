@@ -28,17 +28,11 @@ Where the project is (v0.1) and what's next. Nothing here has a date.
 ## Later
 
 ### Windows hosting
-Players on any OS can join already. Hosting on Windows:
-
-- **No code needed:** document running the Linux server in WSL2 (Ubuntu), including the 32-bit
-  libraries and networking (mirrored mode on Windows 11, port forwarding on Windows 10).
-- **Native support** is a bigger project:
-  - Build the patched Metamod and NavBot with MSVC (NavBot's CI already makes Windows builds; the
-    Metamod fix is the same on Windows). The official SourceMod Windows build works as-is.
-  - Windows gamedata is the hard part. 2.4's Windows `server.dll` has no symbols, so the
-    symbol-name tricks in `tools/` don't apply. Offsets and functions (`ProcessUsercmds`,
-    `CanAttachBarricade`, `gEntList`, ...) need byte-pattern signatures, each verified.
-  - Test the Windows 2.4 dedicated server under Wine on Linux.
+**Done, in testing.** A native Windows build lives in a separate repo (not public yet): patched
+Metamod:Source and NavBot built with MSVC on GitHub Actions, Windows gamedata (vtable offsets
+computed from the Linux vtables with MSVC's layout rules and checked against the DLL's RTTI;
+signatures found by behaviour), a PowerShell installer, and nav meshes for the bot maps. Tested
+with the Windows 2.4 server under Wine. How it was done: [MANUAL.md chapter 12](MANUAL.md#12-the-windows-port).
 
 ### Steam Community guide
 A guide on the ZPS community hub pointing to the releases (the Workshop can't deliver server
