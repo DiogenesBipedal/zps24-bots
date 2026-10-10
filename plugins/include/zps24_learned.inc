@@ -6,6 +6,7 @@
 //           jumps); bots walk them point by point
 //   style   distances a human started shooting at, and backed away at
 //   placements  furniture a human moved: which prop (map hammer ID) and where they left it
+//   entries     ways into buildings a human took as a zombie (outside point, inside point)
 //
 // Learned_Load() reads the current map's file; call it on map and round start.
 
@@ -18,6 +19,7 @@
 #define LEARN_MAX_ROUTES  16
 #define LEARN_MAX_POINTS  12
 #define LEARN_MAX_PLACES  32
+#define LEARN_MAX_ENTRIES 32
 
 int   g_ln_spotCount;
 float g_ln_spots[LEARN_MAX_SPOTS][3];
@@ -32,6 +34,11 @@ int   g_ln_placeCount;
 int   g_ln_placeHammer[LEARN_MAX_PLACES];    // m_iHammerID: the same prop every round
 float g_ln_placeFrom[LEARN_MAX_PLACES][3];   // where the prop starts the round
 float g_ln_placeTo[LEARN_MAX_PLACES][3];     // where the human left it
+
+int   g_ln_entryCount;
+float g_ln_entryOut[LEARN_MAX_ENTRIES][3];
+float g_ln_entryIn[LEARN_MAX_ENTRIES][3];
+int   g_ln_entryUses[LEARN_MAX_ENTRIES];
 
 float g_ln_shootSum, g_ln_retreatSum;        // sums of distances to the nearest zombie
 int   g_ln_shootN, g_ln_retreatN;
@@ -51,6 +58,7 @@ void Learned_Load()
 	g_ln_spotCount = 0;
 	g_ln_routeCount = 0;
 	g_ln_placeCount = 0;
+	g_ln_entryCount = 0;
 	g_ln_shootSum = 0.0; g_ln_retreatSum = 0.0;
 	g_ln_shootN = 0; g_ln_retreatN = 0;
 	char path[PLATFORM_MAX_PATH];
@@ -109,6 +117,18 @@ void Learned_Load()
 		} while (kv.GotoNextKey());
 	}
 	kv.Rewind();
+	if (kv.JumpToKey("entries") && kv.GotoFirstSubKey())
+	{
+		do
+		{
+			if (g_ln_entryCount >= LEARN_MAX_ENTRIES) break;
+			int e = g_ln_entryCount++;
+			kv.GetVector("out", g_ln_entryOut[e]);
+			kv.GetVector("in", g_ln_entryIn[e]);
+			g_ln_entryUses[e] = kv.GetNum("uses", 1);
+		} while (kv.GotoNextKey());
+	}
+	kv.Rewind();
 	if (kv.JumpToKey("style"))
 	{
 		g_ln_shootSum = kv.GetFloat("shoot_sum");
@@ -160,6 +180,17 @@ stock void Learned_Save()
 		kv.GoBack();
 	}
 	kv.Rewind();
+	kv.JumpToKey("entries", true);
+	for (int e = 0; e < g_ln_entryCount; e++)
+	{
+		IntToString(e, key, sizeof(key));
+		kv.JumpToKey(key, true);
+		kv.SetVector("out", g_ln_entryOut[e]);
+		kv.SetVector("in", g_ln_entryIn[e]);
+		kv.SetNum("uses", g_ln_entryUses[e]);
+		kv.GoBack();
+	}
+	kv.Rewind();
 	kv.JumpToKey("style", true);
 	kv.SetFloat("shoot_sum", g_ln_shootSum);
 	kv.SetNum("shoot_n", g_ln_shootN);
@@ -203,4 +234,25 @@ stock int Learned_FindPlaceProp(int k)
 		}
 	}
 	return best;
+}
+
+// Height of open space above a point: short = under a roof (indoors).
+stock float Learned_SpaceAbove(const float from[3])
+{
+	float start[3], to[3];
+	start = from;
+	start[2] += 40.0;
+	to = start;
+	to[2] += 2000.0;
+	TR_TraceRay(start, to, MASK_SOLID_BRUSHONLY, RayType_EndPoint);
+	if (!TR_DidHit() || (TR_GetSurfaceFlags() & SURF_SKY))
+		return 2000.0;
+	float hit[3];
+	TR_GetEndPosition(hit);
+	return hit[2] - start[2];
+}
+
+stock bool Learned_Indoors(const float pos[3])
+{
+	return Learned_SpaceAbove(pos) < 400.0;
 }

@@ -7,6 +7,8 @@
 //   style       how far the nearest zombie is when they open fire, and when they back away
 //   furniture   which pieces they move (shove or carry) and where they leave them: the
 //               survivor bots' barricaders put the same pieces in the same places
+//   entries     (as a zombie) where they get into buildings: the last point outside and the
+//               first point inside; zombie bots attack houses through these first
 //
 // The survivor and zombie AI plugins read the file (include/zps24_learned.inc): survivors defend
 // from learned hold spots first, both teams walk learned routes, survivors copy the distances.
@@ -43,6 +45,8 @@ float g_trail[MAXPLAYERS + 1][32][3];        // off-mesh path being recorded
 float g_trailSince[MAXPLAYERS + 1];
 bool  g_trailBad[MAXPLAYERS + 1];            // ladder or noclip on the way: not walkable by bots
 bool  g_wasShooting[MAXPLAYERS + 1];
+float g_lastOutside[MAXPLAYERS + 1][3];      // as a zombie: last spot outdoors, on the ground
+float g_lastOutsideAt[MAXPLAYERS + 1];
 
 // Furniture near the teacher, watched for being moved
 #define MAX_TRACK 32
@@ -236,6 +240,25 @@ bool IsTeacher(int client)
 	return (GetUserFlagBits(client) & (ADMFLAG_ROOT | ADMFLAG_GENERIC)) != 0;
 }
 
+void RecordEntry(int client, const float out[3], const float inside[3])
+{
+	for (int e = 0; e < g_ln_entryCount; e++)
+		if (GetVectorDistance(g_ln_entryIn[e], inside) < 80.0)
+		{
+			g_ln_entryUses[e]++;
+			Learned_Save();
+			return;
+		}
+	if (g_ln_entryCount >= LEARN_MAX_ENTRIES)
+		return;
+	int e = g_ln_entryCount++;
+	g_ln_entryOut[e] = out;
+	g_ln_entryIn[e] = inside;
+	g_ln_entryUses[e] = 1;
+	Learned_Save();
+	Note("Learned entry %d from %N: %.0f %.0f %.0f -> %.0f %.0f %.0f", e, client, out[0], out[1], out[2], inside[0], inside[1], inside[2]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Furniture the teacher moves
 
@@ -358,6 +381,22 @@ Action Timer_Watch(Handle timer)
 		float pos[3];
 		GetClientAbsOrigin(client, pos);
 
+		// Ways into buildings (as a zombie)
+		if (!survivor && (GetEntityFlags(client) & FL_ONGROUND))
+		{
+			if (!Learned_Indoors(pos))
+			{
+				g_lastOutside[client] = pos;
+				g_lastOutsideAt[client] = GetGameTime();
+			}
+			else if (g_lastOutsideAt[client] > 0.0 && GetGameTime() - g_lastOutsideAt[client] < 1.0
+				&& GetVectorDistance(pos, g_lastOutside[client]) < 200.0)
+			{
+				RecordEntry(client, g_lastOutside[client], pos);
+				g_lastOutsideAt[client] = 0.0;
+			}
+		}
+
 		// Furniture (as a survivor)
 		if (survivor)
 		{
@@ -454,8 +493,8 @@ Action Timer_Watch(Handle timer)
 
 Action Cmd_Status(int args)
 {
-	PrintToServer("[learn] %d hold spots, %d routes, %d furniture placements; opened fire at %.0f on average (%d times), backed away at %.0f (%d times)",
-		g_ln_spotCount, g_ln_routeCount, g_ln_placeCount, g_ln_shootN ? g_ln_shootSum / float(g_ln_shootN) : 0.0, g_ln_shootN,
+	PrintToServer("[learn] %d hold spots, %d routes, %d furniture placements, %d entries; opened fire at %.0f on average (%d times), backed away at %.0f (%d times)",
+		g_ln_spotCount, g_ln_routeCount, g_ln_placeCount, g_ln_entryCount, g_ln_shootN ? g_ln_shootSum / float(g_ln_shootN) : 0.0, g_ln_shootN,
 		g_ln_retreatN ? g_ln_retreatSum / float(g_ln_retreatN) : 0.0, g_ln_retreatN);
 	for (int i = 0; i < g_ln_spotCount; i++)
 		PrintToServer("  spot %d at %.0f %.0f %.0f held %.0f s", i, g_ln_spots[i][0], g_ln_spots[i][1], g_ln_spots[i][2], g_ln_spotSecs[i]);
@@ -469,6 +508,9 @@ Action Cmd_Status(int args)
 	for (int k = 0; k < g_ln_placeCount; k++)
 		PrintToServer("  furniture %d (hammer ID %d): %.0f %.0f %.0f -> %.0f %.0f %.0f", k, g_ln_placeHammer[k],
 			g_ln_placeFrom[k][0], g_ln_placeFrom[k][1], g_ln_placeFrom[k][2], g_ln_placeTo[k][0], g_ln_placeTo[k][1], g_ln_placeTo[k][2]);
+	for (int e = 0; e < g_ln_entryCount; e++)
+		PrintToServer("  entry %d: %.0f %.0f %.0f -> %.0f %.0f %.0f, used %d times", e, g_ln_entryOut[e][0], g_ln_entryOut[e][1],
+			g_ln_entryOut[e][2], g_ln_entryIn[e][0], g_ln_entryIn[e][1], g_ln_entryIn[e][2], g_ln_entryUses[e]);
 	return Plugin_Handled;
 }
 
@@ -477,6 +519,7 @@ Action Cmd_Forget(int args)
 	g_ln_spotCount = 0;
 	g_ln_routeCount = 0;
 	g_ln_placeCount = 0;
+	g_ln_entryCount = 0;
 	g_ln_shootSum = 0.0; g_ln_retreatSum = 0.0;
 	g_ln_shootN = 0; g_ln_retreatN = 0;
 	Learned_Save();

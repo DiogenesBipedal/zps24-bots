@@ -36,6 +36,16 @@ int    g_shove[MAXPLAYERS + 1];          // furniture being shoved out of the wa
 float  g_shoveUntil[MAXPLAYERS + 1];
 float  g_shoveFrom[MAXPLAYERS + 1][3];   // where it was when we started
 float  g_nextShove[MAXPLAYERS + 1];
+int    g_fixed[32];                      // furniture no zombie could move (shared by the horde)
+int    g_fixedCount;
+// Breaking into a building through a chosen entrance (door, window, or one learned from the
+// main player), spread over the horde so they don't all queue at the same door.
+bool   g_hasEntry[MAXPLAYERS + 1];
+float  g_entryOut[MAXPLAYERS + 1][3];    // where to stand outside
+float  g_entryIn[MAXPLAYERS + 1][3];     // a point just inside
+float  g_entryInUntil[MAXPLAYERS + 1];   // pushing through to the inside point until then
+float  g_entryCooldown[MAXPLAYERS + 1];
+float  g_entryChosen[MAXPLAYERS + 1];
 int    g_ignore[MAXPLAYERS + 1][4];      // obstacles that didn't break when hit (entity refs)
 float  g_ignoreUntil[MAXPLAYERS + 1][4];
 float  g_goal[MAXPLAYERS + 1][3];        // where we're heading to reach g_target
@@ -56,6 +66,7 @@ public void OnPluginStart()
 
 void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 {
+	g_fixedCount = 0;                   // props respawn every round
 	Stairs_Relearn();
 }
 
@@ -66,6 +77,10 @@ public void OnMapStart()
 		g_scripted[i] = false;
 		g_smash[i] = INVALID_ENT_REFERENCE;
 		g_shove[i] = INVALID_ENT_REFERENCE;
+		g_hasEntry[i] = false;
+		g_fixedCount = 0;
+		g_entryInUntil[i] = 0.0;
+		g_entryCooldown[i] = 0.0;
 		g_goalTime[i] = 0.0;
 		g_blockedSince[i] = 0.0;
 		for (int k = 0; k < 4; k++)
@@ -205,6 +220,126 @@ void ComputeGoal(int client, int target, float goal[3])
 	goal = pos;
 }
 
+// How many other zombies already use this entrance.
+int EntryLoad(int client, const float out[3])
+{
+	int n = 0;
+	for (int i = 1; i <= MaxClients; i++)
+		if (i != client && g_hasEntry[i] && GetVectorDistance(g_entryOut[i], out) < 80.0 && IsClientInGame(i) && IsPlayerAlive(i))
+			n++;
+	return n;
+}
+
+// Pick a way into the building the target is in: the main player's entrances (as a zombie) and
+// the doors and windows near the target. The cost is the distance from the entrance to the
+// target, minus a bonus for learned entrances (more for ones used often), plus a penalty for
+// each zombie already going through it.
+bool ChooseEntry(int client, const float target[3])
+{
+	float me[3];
+	GetClientAbsOrigin(client, me);
+	float bestCost = 999999.0;
+	bool found = false;
+
+	for (int e = 0; e < g_ln_entryCount; e++)
+	{
+		float d = GetVectorDistance(g_ln_entryIn[e], target);
+		if (d > 700.0)
+			continue;
+		int uses = g_ln_entryUses[e] > 5 ? 5 : g_ln_entryUses[e];
+		float cost = d - 200.0 - 60.0 * float(uses) + 300.0 * float(EntryLoad(client, g_ln_entryOut[e]));
+		if (cost < bestCost)
+		{
+			bestCost = cost;
+			found = true;
+			g_entryOut[client] = g_ln_entryOut[e];
+			g_entryIn[client] = g_ln_entryIn[e];
+		}
+	}
+
+	static const char classes[][] = { "func_door_rotating", "prop_door_rotating", "func_door", "func_breakable", "func_breakable_surf" };
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int ent = -1;
+		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
+		{
+			float center[3];
+			CenterOf(ent, center);
+			float d = GetVectorDistance(center, target);
+			if (d > 600.0 || FloatAbs(center[2] - target[2]) > 160.0)
+				continue;
+			// The outside point is on our side of it, the inside point on the far side.
+			float dir[3], out[3], inside[3];
+			SubtractVectors(me, center, dir);
+			dir[2] = 0.0;
+			NormalizeVector(dir, dir);
+			for (int i = 0; i < 3; i++) { out[i] = center[i] + dir[i] * 64.0; inside[i] = center[i] - dir[i] * 64.0; }
+			out[2] = center[2] - 30.0;
+			inside[2] = center[2] - 30.0;
+			if (Learned_Indoors(out) || !Learned_Indoors(inside))
+				continue;                   // not a way from outside to inside
+			Address area = NavBotNavMesh.GetNearestNavArea(out, 100.0, false, true);
+			if (area == Address_Null)
+				continue;
+			NavBotNavArea.GetClosestPointOnArea(area, out, out);
+			float cost = d + 300.0 * float(EntryLoad(client, out));
+			if (cost < bestCost)
+			{
+				bestCost = cost;
+				found = true;
+				g_entryOut[client] = out;
+				g_entryIn[client] = inside;
+			}
+		}
+	}
+	g_hasEntry[client] = found;
+	g_entryChosen[client] = GetGameTime();
+	if (found)
+		Debug("%N attacks through the entrance at %.0f %.0f %.0f (%d others there)", client,
+			g_entryOut[client][0], g_entryOut[client][1], g_entryOut[client][2], EntryLoad(client, g_entryOut[client]));
+	return found;
+}
+
+// Breaking in: walk to the chosen entrance, then push through it (whatever is in the way gets
+// smashed or shoved by the obstacle code). Returns true when it set moveGoal.
+bool UpdateEntry(int client, const float me[3], const float target[3], bool sees, float moveGoal[3])
+{
+	if (GetGameTime() < g_entryInUntil[client])
+	{
+		moveGoal = g_entryIn[client];
+		if (GetVectorDistance(me, g_entryIn[client]) > 40.0)
+			return true;
+		g_entryInUntil[client] = 0.0;       // inside: hunt normally
+		return false;
+	}
+	// Only from outside, for a target indoors and out of sight.
+	if (sees || Learned_Indoors(me) || !Learned_Indoors(target) || GetVectorDistance(me, target) < 250.0
+		|| GetGameTime() < g_entryCooldown[client])
+	{
+		g_hasEntry[client] = false;
+		return false;
+	}
+	if (!g_hasEntry[client] || GetGameTime() - g_entryChosen[client] > 30.0)
+	{
+		if (!ChooseEntry(client, target))
+		{
+			g_entryCooldown[client] = GetGameTime() + 5.0;
+			return false;
+		}
+	}
+	if (GetVectorDistance(me, g_entryOut[client]) > 60.0)
+	{
+		moveGoal = g_entryOut[client];
+		return true;
+	}
+	// At the entrance: through it.
+	g_hasEntry[client] = false;
+	g_entryInUntil[client] = GetGameTime() + 8.0;
+	g_entryCooldown[client] = GetGameTime() + 20.0;
+	moveGoal = g_entryIn[client];
+	return true;
+}
+
 // Can this entity actually be broken? Big metal furniture is often a prop_physics with no
 // breakable data (no health, takes no damage); hitting it forever is what got zombies stuck.
 bool CanBreak(int ent)
@@ -300,7 +435,13 @@ bool IsFurniture(int ent)
 {
 	char cls[64];
 	GetEntityClassname(ent, cls, sizeof(cls));
-	return StrContains(cls, "prop_physics") != -1;
+	if (StrContains(cls, "prop_physics") == -1)
+		return false;
+	int ref = EntIndexToEntRef(ent);
+	for (int i = 0; i < g_fixedCount; i++)
+		if (g_fixed[i] == ref)
+			return false;                // fixed in place: treat like a wall
+	return true;
 }
 
 // Start shoving a piece of furniture out of the way (right click with the zombie's arms).
@@ -354,6 +495,8 @@ bool UpdateShove(int client, NavBot bot)
 			}
 			else
 			{
+				if (g_fixedCount < sizeof(g_fixed))
+					g_fixed[g_fixedCount++] = EntIndexToEntRef(prop);   // tell the horde
 				Ignore(client, prop);
 				if (Unstick_RandomSpot(client, g_us_detour[client]))
 					g_us_detourUntil[client] = GetGameTime() + 3.0;
@@ -474,6 +617,15 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		else
 			Unstick_WantMove(client, me, moveGoal);
 		return stairs;
+	}
+
+	// Target holed up in a building: attack through an entrance of our own.
+	if (UpdateEntry(client, me, target, sees, moveGoal))
+	{
+		g_blockedSince[client] = 0.0;
+		routeType = NAVBOT_FASTEST_ROUTE;
+		Unstick_WantMove(client, me, moveGoal);
+		return Plugin_Changed;
 	}
 
 	// Close and in plain view: go straight for them.

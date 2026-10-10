@@ -1403,6 +1403,12 @@ Learning from everyone would mix good habits with bad ones.
      position.
    - **Undo:** putting a prop back where it started forgets the placement.
 
+5. **Entrances**, while the teacher plays zombie. Each tick on the ground, the teacher is
+   outdoors or indoors (more or less than 400 units of headroom). Going from outdoors to
+   indoors within a second, and less than 200 units apart, is an entrance: the last point
+   outside and the first point inside. The same entrance again (inside points within 80
+   units) adds a use.
+
 The file is a KeyValues text file per map in `data/zps24_learn/`, readable and editable by hand.
 
 **How the bots use it** (`include/zps24_learned.inc`, loaded at map and round start):
@@ -1423,6 +1429,17 @@ The file is a KeyValues text file per map in `data/zps24_learn/`, readable and e
   shoving code from 11.6 became one function, `PushProp(prop, destination)`, shared by both
   jobs. Pieces the teacher uses are reserved: door barricaders don't take them, and bots
   walking past don't shove them aside once they're in place.
+- **Entrances and spreading out:** a zombie outdoors, hunting a survivor who is indoors and out
+  of sight, now picks its own way in. Candidates are the teacher's entrances near the target
+  and every door or window near it that leads from outside (the point on the zombie's side
+  has open sky, the far side has a roof). Cost: the distance to the target, minus a bonus for
+  learned entrances (bigger for often-used ones), plus 300 for each other zombie already
+  heading through it. That last term spreads the horde over every way in, so survivors can't
+  hold one door. At the entrance the zombie pushes through to the inside point; anything in
+  the way gets smashed or shoved.
+- **Zombies shove furniture too** (right click with `weapon_arms`, the same push assist as
+  survivors). Furniture that doesn't move goes on a list shared by the whole horde, so after
+  the first zombie finds a fixed piece, the rest treat it like a wall.
 - **Fighting distances:** with 20+ shooting samples, the engage range becomes the player's
   average plus 15% (kept within 250 to 1200 units). With 10+ back-off samples, the safe
   distance becomes the player's average (120 to 500).
