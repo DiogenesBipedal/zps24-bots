@@ -234,6 +234,21 @@ index 50a7e6e..f6cd6ed 100644
  		break;
  	}
  
+diff --git a/extension/natives/navarea.cpp b/extension/natives/navarea.cpp
+index ba0aa42..0d9e408 100644
+--- a/extension/natives/navarea.cpp
++++ b/extension/natives/navarea.cpp
+@@ -468,7 +468,9 @@ namespace natives::navarea
+ 			return pawnutils::ReturnBool(false);
+ 		}
+ 
+-		TheNavMesh->NotifyDangerousEditCommandWasUsed(); // kick bots
++		// Adding a connection doesn't delete or move any area, so bots' paths and pointers stay
++		// valid: no need to flag the mesh as dangerous (which kicks every bot and blocks adding
++		// new ones until the map reloads). ZPS 2.4 plugins link rooms through doors at map start.
+ 		from->ConnectTo(to, dir);
+ 		return pawnutils::ReturnBool(true);
+ 	}
 diff --git a/extension/navmesh/nav_area.cpp b/extension/navmesh/nav_area.cpp
 index e802007..514c76e 100644
 --- a/extension/navmesh/nav_area.cpp
