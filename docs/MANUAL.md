@@ -25,9 +25,10 @@ C in spirit, so everything C-like you know still applies; this manual explains t
 9. [Testing a game server without playing it](#9-testing-a-game-server-without-playing-it)
 10. [Writing SourcePawn plugins](#10-writing-sourcepawn-plugins)
 11. [Teaching the bots to play](#11-teaching-the-bots-to-play)
-12. [The tricks, collected](#12-the-tricks-collected)
-13. [Exercises](#13-exercises)
-14. [Glossary](#14-glossary)
+12. [The Windows port](#12-the-windows-port)
+13. [The tricks, collected](#13-the-tricks-collected)
+14. [Exercises](#14-exercises)
+15. [Glossary](#15-glossary)
 
 ---
 
@@ -1526,7 +1527,114 @@ The file is a KeyValues text file per map in `data/zps24_learn/`, readable and e
 
 ---
 
-## 12. The tricks, collected
+## 12. The Windows port
+
+The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
+[zps24-bots-windows](https://github.com/DiogenesBipedal/zps24-bots-windows) (this repo is its
+`core` submodule, so the plugins and patches stay in one place). Done in one night. Three jobs:
+build the native code for Windows, find everything the gamedata names in a DLL with no
+symbols, and test without a Windows PC.
+
+### 12.1 Building with MSVC without Windows
+
+Metamod:Source and NavBot are C++ and must be compiled with Microsoft's compiler to load into
+a Windows `srcds.exe`. Instead of cross-compiling, a **GitHub Actions** workflow runs on a
+Windows runner: same pinned versions, same patches, `configure.py --targets=x86`, `ambuild`.
+NavBot's own CI already builds for Windows, so this was mostly copying its steps.
+
+**The one failure:** `[WinError 206] The filename or extension is too long`, at the very end.
+Everything compiled; the link failed. AMBuild names object files after their full source path,
+NavBot has hundreds of files, and the linker command passed Windows' command line limit.
+Building under `C:\w` instead of the default deep workspace path fixed it.
+
+### 12.2 Vtable offsets without symbols: compute them
+
+45 gamedata entries are vtable slots (see chapter 3). On Linux the tools read them by name. The
+Windows `server.dll` has no names, but there are rules for how the two compilers differ:
+
+1. **Destructors:** Itanium (Linux) has two vtable slots for a virtual destructor, MSVC one.
+2. **Overloads:** MSVC puts all the overloads of a function name that one class declares
+   together, at the first one's position, in **reverse** declaration order. Itanium keeps
+   declaration order.
+
+Everything else is the same: declaration order, base class first. So
+`tools/msvc_layout.py` takes the Linux vtable (names and all), splits it into the part each
+class in the chain adds (the chain comes from Linux RTTI: each `_ZTI` typeinfo points at its
+base class's), applies the two rules inside each part, and gets a Windows index for every
+Linux one. Most come out as "Linux minus one", but not all: `CommitSuicide` stays at 405 because
+its two overloads swap places on Windows.
+
+**How do we know it's right?** MSVC keeps RTTI in the DLL even without symbols:
+- a **type descriptor** containing the decorated name, like `.?AVCHL2MP_Player@@`;
+- a **complete object locator** pointing at it;
+- the word just before a class's vtable points at that locator.
+
+`tools/win_vtable.py` follows that chain and reads the real Windows vtables. For every class
+used, the computed number of slots equals the real number exactly (477 for the player class,
+363 for weapons, 184 for the game rules...). An off-by-one in the rules would have broken
+that.
+
+**When two methods disagreed.** A second method compared "fingerprints" of functions
+(constants, struct offsets, strings) between Linux and Windows. It disagreed with the
+computation 7 times. Reading the machine code side by side (`tools/side.py`) settled each one,
+always in favour of the computation:
+- `Think()` calls a stored member function pointer. Linux reads it at offset `0xc`, Windows
+  at `+8`: on Linux a pointer to member function is 8 bytes, on MSVC 4, so field offsets
+  differ while their *order* doesn't. The second pointer field is `m_pfnThink` on both; the
+  fingerprint had matched the slot that reads the first one (`MoveDone`).
+- `ProcessUsercmds` (how bots move) walks the commands `0x54` bytes apart, which also confirms
+  ZPS 2.4's 84-byte `CUserCmd` (chapter 7.7) on Windows.
+
+The lesson: when there are known rules, compute and verify; use similarity only as a hint.
+
+### 12.3 Signatures: find functions by what they do
+
+Four entries name non-virtual functions. Each was found from behaviour, then turned into a
+unique byte pattern with `tools/makesig.py` (copy the function's first bytes, wildcard call
+targets and absolute addresses, add instructions until exactly one match):
+
+- **`gEntList`** (SourceMod's entity list): SourceMod reads it from an instruction inside
+  `LevelShutdown` (`mov ecx, offset gEntList`) using a signature from its own gamedata for
+  other 2007 mods. That signature matched twice in ZPS's DLL; extended until unique. It also
+  had to go into our custom gamedata, because SourceMod's entry only applies to the mods it
+  lists. Without it: "NULL g_EntList", and NavBot refused to load.
+- **`FireOutput`**: a signature from another mod's gamedata matched once; the function prints
+  `(%0.2f) output: (%s,%s) -> ...`, which is exactly `CBaseEntityOutput::FireOutput`.
+- **`LookupAttachment`**: the function the game calls right after pushing an attachment name
+  (`"eyes"`, `"anim_attachment_RH"`), 12 call sites. Its body matches Linux: model,
+  `Studio_FindAttachment()`, `+ 1`.
+- **`CanAttachBarricade`**: not in the DLL at all. Nothing in the game calls it (on Linux it
+  exists only because every symbol is exported), and MSVC's linker removes unreferenced
+  functions. The survivor plugin now treats it as optional.
+
+### 12.4 Testing under Wine
+
+`srcds.exe` runs under Wine. `scripts/wine-server.sh` starts the Windows server on port 27025
+next to the Linux one. What came up, in order:
+1. Metamod and SourceMod loaded; NavBot didn't: no entity list (fixed in 12.3).
+2. Then everything loaded: nav mesh, 23 bots, survivor and zombie AI, and the lessons
+   learned on Linux (the data files are the same on both platforms).
+3. A clean install from the CI-built release zip, replaying the installer's steps, gave the
+   same result. Then a 20-minute soak: rounds, map changes, no crashes.
+
+### 12.5 Shipping it
+
+The CI also compiles the plugins with SourceMod's Windows compiler and packs a release zip:
+binaries, gamedata, plugins, configs, nav meshes for the bot maps, and an installer
+(`install.ps1` behind a double-clickable `install.bat`). The installer gets SteamCMD and the
+2.4 server, SourceMod, copies the maps from the player's ZPS 2.4 game, sets up admin by LAN IP,
+a firewall rule and `start-server.bat`. Updating keeps the user's configs and nav meshes.
+
+**Lessons.**
+- Look for an existing build pipeline to copy (NavBot's CI) before inventing a toolchain.
+- In a stripped binary, RTTI is a map: class names lead to vtables.
+- Rules plus a check (the vtable lengths) beat guessing; reading the code settles the rest.
+- An unused function can simply not exist on the other platform. Make such dependencies
+  optional.
+
+---
+
+## 13. The tricks, collected
 
 **Reverse engineering**
 1. `file` first. "Not stripped" means you get names for everything.
@@ -1574,9 +1682,15 @@ The file is a KeyValues text file per map in `data/zps24_learn/`, readable and e
 32. To teach bots, record the moments that matter from one trusted player, and keep it as
     editable text.
 
+**Porting**
+33. Windows vtable index = Linux index after MSVC's rules (one destructor slot, overloads grouped
+    and reversed per class); verify with the vtable lengths from RTTI.
+34. Find a stripped function by what it does: its strings, its callers, its arguments.
+35. Build Windows binaries on a CI Windows runner; keep build paths short.
+
 ---
 
-## 13. Exercises
+## 14. Exercises
 
 Each builds on something in this repo.
 
@@ -1595,7 +1709,7 @@ Each builds on something in this repo.
 
 ---
 
-## 14. Glossary
+## 15. Glossary
 
 | Term | Meaning |
 |---|---|
@@ -1615,6 +1729,8 @@ Each builds on something in this repo.
 | Mangling | Encoding C++ names and types into symbol names. |
 | Dead end | Here: a goal area a zombie reached without being able to see its target; avoided for 20 s. |
 | Hold-out | The building survivor bots choose to defend. |
+| Complete object locator | MSVC RTTI record that sits just before a vtable and leads to the class's name. |
+| MSVC | Microsoft's C++ compiler; Windows builds of Source games and plugins use it. |
 | `MoveTowards` | NavBot native that walks a bot straight at a point, with no pathfinding. |
 | Learning from demonstration | Teaching an AI by recording what a skilled player does and reusing it. |
 | Home | The house a survivor bot defends: the doors and windows around where it spawned. |
