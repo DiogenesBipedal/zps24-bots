@@ -962,8 +962,8 @@ int FindObstacle(int client)
 	return best;
 }
 
-// Wooden barricades: planks (func_physbox), boards survivors nailed up (barricade models),
-// wooden breakables. Broken with normal hits (left click), never shoved.
+// Things to break with normal hits (left click), never shove: planks (func_physbox), boards
+// survivors nailed up (barricade models), wooden breakables, padlocks.
 bool IsWooden(int ent)
 {
 	if (ent <= MaxClients || !IsValidEntity(ent))
@@ -978,8 +978,9 @@ bool IsWooden(int ent)
 	{
 		char model[128];
 		GetEntPropString(ent, Prop_Data, "m_ModelName", model, sizeof(model));
-		if (StrContains(model, "barricade", false) != -1 || StrContains(model, "wood", false) != -1 || StrContains(model, "plank", false) != -1)
-			return true;
+		if (StrContains(model, "barricade", false) != -1 || StrContains(model, "wood", false) != -1 || StrContains(model, "plank", false) != -1
+			|| StrContains(model, "padlock", false) != -1 || StrContains(model, "lock", false) != -1)
+			return true;                 // wood, and padlocks (they don't move: break them)
 	}
 	return false;
 }
