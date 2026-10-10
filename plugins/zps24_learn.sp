@@ -53,7 +53,8 @@ float g_lastOutsideAt[MAXPLAYERS + 1];
 int   g_trk[MAX_TRACK];                      // entity references
 float g_trkStart[MAX_TRACK][3];              // where it was before this move
 float g_trkLast[MAX_TRACK][3];               // last tick
-bool  g_trkMoved[MAX_TRACK];                 // moved while the teacher was next to it
+bool  g_trkMoved[MAX_TRACK];                 // moved by the teacher
+float g_handsOn[MAXPLAYERS + 1];             // last time the teacher pressed use / shove / attack
 bool  g_wasRetreating[MAXPLAYERS + 1];
 
 public void OnPluginStart()
@@ -314,8 +315,10 @@ void UpdateTracked(int teacher)
 		g_trkLast[t] = p;
 		if (step > 2.0)
 		{
-			if (GetVectorDistance(p, me) < 160.0)
-				g_trkMoved[t] = true;          // the teacher is moving it
+			// The teacher is moving it: right next to it and using their hands (use to carry,
+			// right click to shove, attack). Bots pushing furniture nearby don't count.
+			if (GetVectorDistance(p, me) < 100.0 && GetGameTime() - g_handsOn[teacher] < 1.5)
+				g_trkMoved[t] = true;
 			else if (!g_trkMoved[t])
 				g_trkStart[t] = p;             // something else moved it (a zombie, physics)
 			continue;
@@ -400,6 +403,9 @@ Action Timer_Watch(Handle timer)
 				g_lastOutsideAt[client] = 0.0;
 			}
 		}
+
+		if (GetClientButtons(client) & (IN_USE | IN_ATTACK2 | IN_ATTACK))
+			g_handsOn[client] = GetGameTime();
 
 		// Furniture (either team: survivors barricade, zombies build steps up to roofs)
 		TrackFurnitureNear(pos);
