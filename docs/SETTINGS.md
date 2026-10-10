@@ -107,6 +107,7 @@ The bots pick up new lessons at the next round.
 | `sm_radio_volume` | 0.5 | Volume, 0 to 1 |
 | `sm_radio_autostart` | 1 | Start playing on every map |
 | `sm_radio_shuffle` | 1 | Play tracks in random order |
+| `sm_radio_repeat` | 0 | Repeat the current song over and over (menu: **Repeat this song**; **Pick a song** chooses it) |
 
 | Command | Who | What it does |
 |---|---|---|

@@ -2,7 +2,7 @@
 //
 // Plays playlists ("stations") of MP3s to every player. Tracks come from
 // configs/zps24_radio.cfg, written by scripts/radio-import.sh. Admins control it from the M menu
-// (sm_radio): play/stop, next track, station, shuffle, volume. Any player can mute it for
+// (sm_radio): play/stop, next track, pick a song, repeat one song, station, shuffle, volume. Any player can mute it for
 // themselves with !radio (sm_radiomute).
 #include <sourcemod>
 #include <sdktools>
@@ -17,7 +17,7 @@ public Plugin myinfo =
 
 #define MAX_TRACKS 512
 
-ConVar g_volume, g_autostart, g_shuffle;
+ConVar g_volume, g_autostart, g_shuffle, g_repeat;
 
 // Loaded playlist
 char  g_stationName[32][32];
@@ -40,6 +40,7 @@ public void OnPluginStart()
 	g_volume    = CreateConVar("sm_radio_volume", "0.5", "Radio volume (0-1)", _, true, 0.0, true, 1.0);
 	g_autostart = CreateConVar("sm_radio_autostart", "1", "Start the radio automatically on each map");
 	g_shuffle   = CreateConVar("sm_radio_shuffle", "1", "Play tracks in random order");
+	g_repeat    = CreateConVar("sm_radio_repeat", "0", "Repeat the current song over and over");
 	AutoExecConfig(true, "zps24_radio");
 
 	RegAdminCmd("sm_radio", Cmd_Menu, ADMFLAG_GENERIC, "Radio control menu");
@@ -191,7 +192,7 @@ Action Timer_Next(Handle timer)
 {
 	g_nextTimer = null;
 	if (g_playing)
-		Play(-1);
+		Play(g_repeat.BoolValue && g_current >= 0 ? g_current : -1);   // repeat one, or the next song
 	return Plugin_Stop;
 }
 
@@ -246,6 +247,8 @@ void ShowRadioMenu(int client)
 	m.AddItem("toggle", g_playing ? "Stop" : "Play");
 	m.AddItem("next", "Next track");
 	m.AddItem("station", "Change station");
+	m.AddItem("pick", "Pick a song");
+	m.AddItem("repeat", g_repeat.BoolValue ? "Repeat this song: on" : "Repeat this song: off");
 	m.AddItem("shuffle", g_shuffle.BoolValue ? "Shuffle: on" : "Shuffle: off");
 	m.AddItem("vol+", "Volume +10%");
 	m.AddItem("vol-", "Volume -10%");
@@ -261,6 +264,13 @@ int Menu_Radio(Menu menu, MenuAction action, int client, int item)
 	if (StrEqual(info, "toggle"))        { if (g_playing) Stop(); else Play(-1); }
 	else if (StrEqual(info, "next"))     Play(-1);
 	else if (StrEqual(info, "shuffle"))  g_shuffle.BoolValue = !g_shuffle.BoolValue;
+	else if (StrEqual(info, "repeat"))
+	{
+		g_repeat.BoolValue = !g_repeat.BoolValue;
+		if (g_current >= 0)
+			PrintToChatAll("[Radio] %s %s", g_repeat.BoolValue ? "repeating" : "no longer repeating", g_trackTitle[g_current]);
+	}
+	else if (StrEqual(info, "pick"))     { ShowTrackMenu(client); return 0; }
 	else if (StrEqual(info, "vol+") || StrEqual(info, "vol-"))
 	{
 		float v = g_volume.FloatValue + (info[3] == '+' ? 0.1 : -0.1);
@@ -269,6 +279,39 @@ int Menu_Radio(Menu menu, MenuAction action, int client, int item)
 			Play(g_current);   // restart the track at the new volume
 	}
 	else if (StrEqual(info, "station"))  { ShowStationMenu(client); return 0; }
+	ShowRadioMenu(client);
+	return 0;
+}
+
+void ShowTrackMenu(int client)
+{
+	if (g_stations == 0)
+	{
+		ShowRadioMenu(client);
+		return;
+	}
+	Menu m = new Menu(Menu_Track);
+	m.SetTitle("%s: pick a song", g_stationName[g_station]);
+	char idx[8], label[80];
+	int first = g_stationFirst[g_station];
+	for (int t = first; t < first + g_stationCount[g_station]; t++)
+	{
+		IntToString(t, idx, sizeof(idx));
+		Format(label, sizeof(label), "%s%s", t == g_current ? "> " : "", g_trackTitle[t]);
+		m.AddItem(idx, label);
+	}
+	m.ExitBackButton = true;
+	m.Display(client, MENU_TIME_FOREVER);
+}
+
+int Menu_Track(Menu menu, MenuAction action, int client, int item)
+{
+	if (action == MenuAction_End) { delete menu; return 0; }
+	if (action == MenuAction_Cancel && item == MenuCancel_ExitBack) { ShowRadioMenu(client); return 0; }
+	if (action != MenuAction_Select) return 0;
+	char idx[8];
+	menu.GetItem(item, idx, sizeof(idx));
+	Play(StringToInt(idx));
 	ShowRadioMenu(client);
 	return 0;
 }
