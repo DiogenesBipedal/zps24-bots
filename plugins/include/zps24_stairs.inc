@@ -19,7 +19,7 @@
 #include "include/zps24_learned.inc"
 
 #define STAIRS_MAX_ROUTES  20                   // 4 hand-made + learned from humans
-#define STAIRS_MAX_POINTS  12
+#define STAIRS_MAX_POINTS  24
 
 int   g_st_routeCount;
 int   g_st_pointCount[STAIRS_MAX_ROUTES];
@@ -218,7 +218,15 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 		float look[3];
 		look = wp;
 		look[2] += 60.0;
-		NavBotPlayerControllerInterface.AimAtPos(bot.GetPlayerControllerInterface(), look, LOOK_MOVEMENT, 0.3, "Taking the stairs");
+		Address ctrl = bot.GetPlayerControllerInterface();
+		NavBotPlayerControllerInterface.AimAtPos(ctrl, look, LOOK_MOVEMENT, 0.3, "Taking the stairs");
+		// Next point higher than a step (onto a car, a crate, a roof edge): jump for it, crouched,
+		// the way players climb.
+		if (wp[2] - me[2] > 18.0 && d < 90.0 && (GetEntityFlags(client) & FL_ONGROUND))
+		{
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_JUMP, 0.1);
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_CROUCH, 0.6);
+		}
 		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), wp, 100);
 		result = Plugin_Continue;                    // keep the behavior, no pathfinding
 		return true;

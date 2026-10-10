@@ -41,7 +41,7 @@ bool  g_wasOnMesh[MAXPLAYERS + 1];          // has been on the mesh (so a trail 
 bool  g_inTrail[MAXPLAYERS + 1];
 float g_lastOnMesh[MAXPLAYERS + 1][3];
 int   g_trailLen[MAXPLAYERS + 1];
-float g_trail[MAXPLAYERS + 1][32][3];        // off-mesh path being recorded
+float g_trail[MAXPLAYERS + 1][64][3];        // off-mesh path being recorded
 float g_trailSince[MAXPLAYERS + 1];
 bool  g_trailBad[MAXPLAYERS + 1];            // ladder or noclip on the way: not walkable by bots
 bool  g_wasShooting[MAXPLAYERS + 1];
@@ -159,7 +159,7 @@ void EndTrail(int client, const float pos[3])
 	float secs = GetGameTime() - g_trailSince[client];
 	float start[3];
 	start = g_lastOnMesh[client];
-	if (g_trailBad[client] || secs > 15.0 || FloatAbs(pos[2] - start[2]) < 48.0)
+	if (g_trailBad[client] || secs > 45.0 || FloatAbs(pos[2] - start[2]) < 48.0)
 		return;
 
 	// Points: last spot on the mesh, the path (thinned to fit), first spot back on the mesh.
@@ -321,7 +321,7 @@ void UpdateTracked(int teacher)
 			continue;
 		}
 		if (g_trkMoved[t] && GetVectorDistance(p, g_trkStart[t]) >= 48.0)
-			RecordPlacement(ent, g_trkStart[t], p);
+			RecordPlacement(ent, g_trkStart[t], p, GetClientTeam(teacher));
 		g_trkMoved[t] = false;
 		g_trkStart[t] = p;
 		if (GetVectorDistance(p, me) > 500.0)
@@ -329,7 +329,7 @@ void UpdateTracked(int teacher)
 	}
 }
 
-void RecordPlacement(int ent, const float from[3], const float to[3])
+void RecordPlacement(int ent, const float from[3], const float to[3], int team)
 {
 	int hammer = HammerID(ent);
 	int k = -1;
@@ -347,6 +347,7 @@ void RecordPlacement(int ent, const float from[3], const float to[3])
 		g_ln_placeHammer[k] = hammer;
 		g_ln_placeFrom[k] = from;               // where it starts the round
 	}
+	g_ln_placeTeam[k] = team;
 	if (GetVectorDistance(to, g_ln_placeFrom[k]) < 48.0)
 	{
 		// Put back where it started: forget it.
@@ -356,13 +357,14 @@ void RecordPlacement(int ent, const float from[3], const float to[3])
 			g_ln_placeHammer[i] = g_ln_placeHammer[i + 1];
 			g_ln_placeFrom[i] = g_ln_placeFrom[i + 1];
 			g_ln_placeTo[i] = g_ln_placeTo[i + 1];
+			g_ln_placeTeam[i] = g_ln_placeTeam[i + 1];
 		}
 		Learned_Save();
 		return;
 	}
 	g_ln_placeTo[k] = to;
 	Learned_Save();
-	Note("Learned furniture placement %d (prop hammer ID %d): %.0f %.0f %.0f -> %.0f %.0f %.0f", k, hammer,
+	Note("Learned %s furniture placement %d (prop hammer ID %d): %.0f %.0f %.0f -> %.0f %.0f %.0f", team == TEAM_ZOMBIES ? "zombie" : "survivor", k, hammer,
 		g_ln_placeFrom[k][0], g_ln_placeFrom[k][1], g_ln_placeFrom[k][2], to[0], to[1], to[2]);
 }
 
@@ -399,12 +401,9 @@ Action Timer_Watch(Handle timer)
 			}
 		}
 
-		// Furniture (as a survivor)
-		if (survivor)
-		{
-			TrackFurnitureNear(pos);
-			UpdateTracked(client);
-		}
+		// Furniture (either team: survivors barricade, zombies build steps up to roofs)
+		TrackFurnitureNear(pos);
+		UpdateTracked(client);
 
 		// Hold spots (as a survivor)
 		if (survivor && (g_anchorSince[client] == 0.0 || GetVectorDistance(pos, g_anchor[client]) > 80.0))
@@ -438,7 +437,7 @@ Action Timer_Watch(Handle timer)
 			int n = g_trailLen[client];
 			if (onGround && n < sizeof(g_trail[]) && (n == 0 || GetVectorDistance(pos, g_trail[client][n - 1]) > 24.0))
 				g_trail[client][g_trailLen[client]++] = pos;
-			if (GetGameTime() - g_trailSince[client] > 15.0)
+			if (GetGameTime() - g_trailSince[client] > 45.0)
 			{
 				g_inTrail[client] = false;    // wandering off the mesh, not a route
 				g_wasOnMesh[client] = false;
@@ -508,7 +507,7 @@ Action Cmd_Status(int args)
 			g_ln_routes[r][last][0], g_ln_routes[r][last][1], g_ln_routes[r][last][2], g_ln_routeLen[r], g_ln_routeUses[r]);
 	}
 	for (int k = 0; k < g_ln_placeCount; k++)
-		PrintToServer("  furniture %d (hammer ID %d): %.0f %.0f %.0f -> %.0f %.0f %.0f", k, g_ln_placeHammer[k],
+		PrintToServer("  %s furniture %d (hammer ID %d): %.0f %.0f %.0f -> %.0f %.0f %.0f", g_ln_placeTeam[k] == TEAM_ZOMBIES ? "zombie" : "survivor", k, g_ln_placeHammer[k],
 			g_ln_placeFrom[k][0], g_ln_placeFrom[k][1], g_ln_placeFrom[k][2], g_ln_placeTo[k][0], g_ln_placeTo[k][1], g_ln_placeTo[k][2]);
 	for (int e = 0; e < g_ln_entryCount; e++)
 		PrintToServer("  entry %d: %.0f %.0f %.0f -> %.0f %.0f %.0f, used %d times", e, g_ln_entryOut[e][0], g_ln_entryOut[e][1],

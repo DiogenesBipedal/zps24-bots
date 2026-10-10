@@ -898,7 +898,7 @@ int ClaimPlacement(int client)
 	float bestDist = 999999.0;
 	for (int k = 0; k < g_ln_placeCount; k++)
 	{
-		if (g_placeHome[k] != h || g_placeDone[k] || (g_placeClaim[k] != 0 && g_placeClaim[k] != client))
+		if (g_ln_placeTeam[k] != TEAM_SURVIVORS || g_placeHome[k] != h || g_placeDone[k] || (g_placeClaim[k] != 0 && g_placeClaim[k] != client))
 			continue;
 		float d = GetVectorDistance(me, g_ln_placeTo[k]);
 		if (d < bestDist) { bestDist = d; best = k; }
@@ -979,7 +979,7 @@ bool IsBarricadeProp(int ent)
 		if (!g_openingWindow[o] && g_openingHome[o] != -1 && GetVectorDistance(pos, g_openingPos[o]) < 90.0)
 			return true;
 	for (int k = 0; k < g_ln_placeCount; k++)          // where the main player puts furniture
-		if (GetVectorDistance(pos, g_ln_placeTo[k]) < 40.0)
+		if (g_ln_placeTeam[k] == TEAM_SURVIVORS && GetVectorDistance(pos, g_ln_placeTo[k]) < 40.0)
 			return true;
 	return false;
 }
@@ -1018,7 +1018,7 @@ int FindFurniture(int o, float maxDist)
 				continue;
 			bool reserved = false;                              // the main player uses it elsewhere
 			for (int k = 0; k < g_ln_placeCount && !reserved; k++)
-				reserved = GetVectorDistance(pos, g_ln_placeFrom[k]) < 32.0;
+				reserved = g_ln_placeTeam[k] == TEAM_SURVIVORS && GetVectorDistance(pos, g_ln_placeFrom[k]) < 32.0;
 			if (reserved)
 				continue;
 			// Must be indoors, on the home side of the door.

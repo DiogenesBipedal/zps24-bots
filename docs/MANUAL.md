@@ -1409,6 +1409,21 @@ Learning from everyone would mix good habits with bad ones.
    outside and the first point inside. The same entrance again (inside points within 80
    units) adds a use.
 
+6. **Zombie tricks: building a step.** The player, as a zombie, pushed a car under a roof edge,
+   jumped onto it, then onto the roof, and went in through a top window. Three changes taught
+   the bots this:
+   - **Furniture placements are recorded on both teams**, tagged with the team. Survivor
+     placements are barricades; zombie placements are steps. Each round the nearest zombie bot
+     is assigned to push the piece where the player put it. It stands on the far side, sized
+     from the prop's bounds since a car is much bigger than a chair, and shoves with right
+     click plus the push assist. Once the piece is in place, no zombie shoves it aside.
+   - **Routes keep more and last longer:** up to 24 points (was 12) and 45 s off the mesh (was
+     15), so a slow climb across a roof still counts and the point on top of the car isn't
+     thinned away.
+   - **Bots jump along routes.** When the next point is more than a step (18 units) higher,
+     the bot presses jump and holds crouch, the HL2 crouch-jump players use to climb. The
+     recorded climb went ground 8 → car 28 → 81 → 130 → roof 168: four jumps.
+
 The file is a KeyValues text file per map in `data/zps24_learn/`, readable and editable by hand.
 
 **How the bots use it** (`include/zps24_learned.inc`, loaded at map and round start):

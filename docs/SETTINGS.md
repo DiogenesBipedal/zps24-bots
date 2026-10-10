@@ -52,6 +52,9 @@ The bots watch one player, the host (server admins), and copy them. Per map, sav
   the stairs, anywhere). Each round, a house's furniture-pushers put the same pieces in the same
   places before barricading the doors. Pieces are recognized by their map ID, so it works
   across rounds; putting a piece back where it started forgets it.
+- **Furniture as a zombie:** a piece you move as a zombie (a car pushed under a roof edge to
+  climb on) is a step: each round a zombie bot pushes it there, and the horde climbs your
+  route over it, jumping where you jumped.
 - **Entrances (as a zombie):** where you get into buildings, as the last point outside and the
   first point inside. Zombie bots attack houses through these first, more so the more often you
   used one.

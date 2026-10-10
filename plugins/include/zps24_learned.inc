@@ -17,7 +17,7 @@
 
 #define LEARN_MAX_SPOTS   64
 #define LEARN_MAX_ROUTES  16
-#define LEARN_MAX_POINTS  12
+#define LEARN_MAX_POINTS  24
 #define LEARN_MAX_PLACES  32
 #define LEARN_MAX_ENTRIES 32
 
@@ -34,6 +34,7 @@ int   g_ln_placeCount;
 int   g_ln_placeHammer[LEARN_MAX_PLACES];    // m_iHammerID: the same prop every round
 float g_ln_placeFrom[LEARN_MAX_PLACES][3];   // where the prop starts the round
 float g_ln_placeTo[LEARN_MAX_PLACES][3];     // where the human left it
+int   g_ln_placeTeam[LEARN_MAX_PLACES];      // 2 = moved as a survivor (barricade), 3 = as a zombie (e.g. a step up to a roof)
 
 int   g_ln_entryCount;
 float g_ln_entryOut[LEARN_MAX_ENTRIES][3];
@@ -114,6 +115,7 @@ void Learned_Load()
 			g_ln_placeHammer[k] = kv.GetNum("hammer");
 			kv.GetVector("from", g_ln_placeFrom[k]);
 			kv.GetVector("to", g_ln_placeTo[k]);
+			g_ln_placeTeam[k] = kv.GetNum("team", 2);
 		} while (kv.GotoNextKey());
 	}
 	kv.Rewind();
@@ -179,6 +181,7 @@ stock void Learned_Save()
 		kv.SetNum("hammer", g_ln_placeHammer[k]);
 		kv.SetVector("from", g_ln_placeFrom[k]);
 		kv.SetVector("to", g_ln_placeTo[k]);
+		kv.SetNum("team", g_ln_placeTeam[k]);
 		kv.GoBack();
 	}
 	kv.Rewind();

@@ -36,6 +36,10 @@ int    g_shove[MAXPLAYERS + 1];          // furniture being shoved out of the wa
 float  g_shoveUntil[MAXPLAYERS + 1];
 float  g_shoveFrom[MAXPLAYERS + 1][3];   // where it was when we started
 float  g_nextShove[MAXPLAYERS + 1];
+int    g_place[MAXPLAYERS + 1] = { -1, ... };   // learned zombie furniture placement this bot is setting up
+float  g_placeStarted[MAXPLAYERS + 1];
+int    g_placeBy[LEARN_MAX_PLACES];      // zombie setting it up this round (0 = nobody)
+bool   g_placeDone[LEARN_MAX_PLACES];
 int    g_fixed[32];                      // furniture no zombie could move (shared by the horde)
 int    g_fixedCount;
 // Breaking into a building through a chosen entrance (door, window, or one learned from the
@@ -68,6 +72,7 @@ void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 {
 	g_fixedCount = 0;                   // props respawn every round
 	Stairs_Relearn();
+	ResetPlacements();
 }
 
 public void OnMapStart()
@@ -88,6 +93,7 @@ public void OnMapStart()
 		Unstick_Reset(i);
 	}
 	Stairs_OnMapStart();
+	ResetPlacements();
 	CreateTimer(0.5, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
@@ -441,6 +447,147 @@ bool IsFurniture(int ent)
 	for (int i = 0; i < g_fixedCount; i++)
 		if (g_fixed[i] == ref)
 			return false;                // fixed in place: treat like a wall
+	return !IsZombieStep(ent);
+}
+
+// Furniture sitting where the main player put it as a zombie (a car to climb a roof from):
+// leave it there.
+bool IsZombieStep(int ent)
+{
+	float pos[3];
+	GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", pos);
+	for (int k = 0; k < g_ln_placeCount; k++)
+		if (g_ln_placeTeam[k] == TEAM_ZOMBIES && GetVectorDistance(pos, g_ln_placeTo[k]) < 48.0)
+			return true;
+	return false;
+}
+
+void ResetPlacements()
+{
+	for (int k = 0; k < LEARN_MAX_PLACES; k++)
+	{
+		g_placeBy[k] = 0;
+		g_placeDone[k] = false;
+	}
+	for (int i = 0; i <= MaxClients; i++)
+		g_place[i] = -1;
+}
+
+// Hand each learned zombie placement that isn't in place yet to the nearest free zombie.
+void AssignPlacements()
+{
+	for (int k = 0; k < g_ln_placeCount; k++)
+	{
+		if (g_ln_placeTeam[k] != TEAM_ZOMBIES || g_placeDone[k])
+			continue;
+		if (g_placeBy[k] != 0 && IsClientInGame(g_placeBy[k]) && IsPlayerAlive(g_placeBy[k]) && g_place[g_placeBy[k]] == k)
+			continue;
+		int prop = Learned_FindPlaceProp(k);
+		if (prop == -1)
+		{
+			g_placeDone[k] = true;           // gone this round
+			continue;
+		}
+		float pos[3];
+		GetEntPropVector(prop, Prop_Data, "m_vecAbsOrigin", pos);
+		if (GetVectorDistance(pos, g_ln_placeTo[k]) < 48.0)
+			continue;                        // already there
+		int best = 0;
+		float bestDist = 2500.0;
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES || !NavBotManager.IsNavBot(i) || g_place[i] != -1)
+				continue;
+			float z[3];
+			GetClientAbsOrigin(i, z);
+			float d = GetVectorDistance(z, pos);
+			if (d < bestDist) { bestDist = d; best = i; }
+		}
+		if (best)
+		{
+			g_place[best] = k;
+			g_placeBy[k] = best;
+			g_placeStarted[best] = GetGameTime();
+			Debug("%N sets up the main player's furniture %d (a step for the horde)", best, k);
+		}
+	}
+}
+
+// Shove a learned zombie placement into place: stand on the far side of it from where it goes,
+// right click (arms' punt plus the push assist), repeat. Returns true when it set moveGoal or is
+// working (the caller returns Plugin_Changed / Plugin_Continue accordingly through `walking`).
+bool UpdatePlace(int client, NavBot bot, float moveGoal[3], bool &walking)
+{
+	int k = g_place[client];
+	if (k < 0)
+		return false;
+	int prop = Learned_FindPlaceProp(k);
+	if (prop == -1 || GetGameTime() - g_placeStarted[client] > 45.0)
+	{
+		g_placeDone[k] = true;
+		g_place[client] = -1;
+		return false;
+	}
+	float pos[3], c[3], me[3], eye[3];
+	GetEntPropVector(prop, Prop_Data, "m_vecAbsOrigin", pos);
+	CenterOf(prop, c);
+	GetClientAbsOrigin(client, me);
+	GetClientEyePosition(client, eye);
+	float to[3];
+	to = g_ln_placeTo[k];
+	to[2] = pos[2];
+	if (GetVectorDistance(pos, to) < 40.0)
+	{
+		Debug("%N set up the main player's furniture %d", client, k);
+		g_placeDone[k] = true;
+		g_place[client] = -1;
+		return false;
+	}
+	// Behind it, on the line from its destination through it.
+	float back[3], spot[3];
+	SubtractVectors(pos, to, back);
+	back[2] = 0.0;
+	NormalizeVector(back, back);
+	float size = 40.0;
+	if (HasEntProp(prop, Prop_Send, "m_vecMaxs"))
+	{
+		float mins[3], maxs[3];
+		GetEntPropVector(prop, Prop_Send, "m_vecMins", mins);
+		GetEntPropVector(prop, Prop_Send, "m_vecMaxs", maxs);
+		size = (maxs[0] - mins[0] > maxs[1] - mins[1] ? maxs[0] - mins[0] : maxs[1] - mins[1]) * 0.5 + 30.0;
+	}
+	ScaleVector(back, size);
+	AddVectors(c, back, spot);
+	spot[2] = me[2];
+	Address area = NavBotNavMesh.GetNearestNavArea(spot, 200.0, false, true);
+	if (area != Address_Null)
+		NavBotNavArea.GetClosestPointOnArea(area, spot, spot);
+	if (GetVectorDistance(me, spot) > 40.0 && GetVectorDistance(eye, c) > size + 30.0)
+	{
+		moveGoal = spot;
+		walking = true;
+		return true;
+	}
+	Address ctrl = bot.GetPlayerControllerInterface();
+	c[2] -= 4.0;
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Setting up a step");
+	if (GetVectorDistance(eye, c) > size + 20.0)
+		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
+	else if (GetGameTime() >= g_nextShove[client] && NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+	{
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKSEC, 0.15);
+		g_nextShove[client] = GetGameTime() + 0.8;
+		float dir[3];
+		SubtractVectors(to, pos, dir);
+		dir[2] = 0.0;
+		NormalizeVector(dir, dir);
+		DataPack pack;
+		CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
+		pack.WriteCell(EntIndexToEntRef(prop));
+		pack.WriteFloat(dir[0]);
+		pack.WriteFloat(dir[1]);
+	}
+	walking = false;
 	return true;
 }
 
@@ -586,6 +733,22 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 	g_smash[client] = INVALID_ENT_REFERENCE;
 
+	// Setting up a step the main player built (a car under the roof edge)?
+	bool walking;
+	if (UpdatePlace(client, bot, moveGoal, walking))
+	{
+		float me2[3];
+		GetClientAbsOrigin(client, me2);
+		if (!walking)
+		{
+			g_us_wantMove[client] = false;
+			return Plugin_Continue;
+		}
+		routeType = NAVBOT_FASTEST_ROUTE;
+		Unstick_WantMove(client, me2, moveGoal);
+		return Plugin_Changed;
+	}
+
 	if (Unstick_Goal(client, moveGoal))
 		return Plugin_Changed;              // detour around whatever we're stuck on
 
@@ -677,11 +840,13 @@ Action Timer_Think(Handle timer)
 	if (!g_enable.BoolValue || !LibraryExists("navbot") || !NavBotNavMesh.IsLoaded())
 		return Plugin_Continue;
 
+	AssignPlacements();
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		if (!IsClientInGame(client) || !IsPlayerAlive(client) || GetClientTeam(client) != TEAM_ZOMBIES || !NavBotManager.IsNavBot(client))
 		{
 			g_scripted[client] = false;
+			if (g_place[client] != -1) { g_placeBy[g_place[client]] = 0; g_place[client] = -1; }
 			continue;
 		}
 		NavBot bot = NavBotManager.GetNavBotByIndex(client);
