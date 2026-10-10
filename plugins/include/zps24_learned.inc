@@ -5,6 +5,7 @@
 //   routes  paths a human took between floors where the nav mesh has no areas (steep stairs,
 //           jumps); bots walk them point by point
 //   style   distances a human started shooting at, and backed away at
+//   placements  furniture a human moved: which prop (map hammer ID) and where they left it
 //
 // Learned_Load() reads the current map's file; call it on map and round start.
 
@@ -16,6 +17,7 @@
 #define LEARN_MAX_SPOTS   64
 #define LEARN_MAX_ROUTES  16
 #define LEARN_MAX_POINTS  12
+#define LEARN_MAX_PLACES  32
 
 int   g_ln_spotCount;
 float g_ln_spots[LEARN_MAX_SPOTS][3];
@@ -25,6 +27,11 @@ int   g_ln_routeCount;
 int   g_ln_routeLen[LEARN_MAX_ROUTES];
 float g_ln_routes[LEARN_MAX_ROUTES][LEARN_MAX_POINTS][3];
 int   g_ln_routeUses[LEARN_MAX_ROUTES];      // times a human took it
+
+int   g_ln_placeCount;
+int   g_ln_placeHammer[LEARN_MAX_PLACES];    // m_iHammerID: the same prop every round
+float g_ln_placeFrom[LEARN_MAX_PLACES][3];   // where the prop starts the round
+float g_ln_placeTo[LEARN_MAX_PLACES][3];     // where the human left it
 
 float g_ln_shootSum, g_ln_retreatSum;        // sums of distances to the nearest zombie
 int   g_ln_shootN, g_ln_retreatN;
@@ -43,6 +50,7 @@ void Learned_Load()
 {
 	g_ln_spotCount = 0;
 	g_ln_routeCount = 0;
+	g_ln_placeCount = 0;
 	g_ln_shootSum = 0.0; g_ln_retreatSum = 0.0;
 	g_ln_shootN = 0; g_ln_retreatN = 0;
 	char path[PLATFORM_MAX_PATH];
@@ -89,6 +97,18 @@ void Learned_Load()
 		} while (kv.GotoNextKey());
 	}
 	kv.Rewind();
+	if (kv.JumpToKey("placements") && kv.GotoFirstSubKey())
+	{
+		do
+		{
+			if (g_ln_placeCount >= LEARN_MAX_PLACES) break;
+			int k = g_ln_placeCount++;
+			g_ln_placeHammer[k] = kv.GetNum("hammer");
+			kv.GetVector("from", g_ln_placeFrom[k]);
+			kv.GetVector("to", g_ln_placeTo[k]);
+		} while (kv.GotoNextKey());
+	}
+	kv.Rewind();
 	if (kv.JumpToKey("style"))
 	{
 		g_ln_shootSum = kv.GetFloat("shoot_sum");
@@ -129,6 +149,17 @@ stock void Learned_Save()
 		kv.GoBack();
 	}
 	kv.Rewind();
+	kv.JumpToKey("placements", true);
+	for (int k = 0; k < g_ln_placeCount; k++)
+	{
+		IntToString(k, key, sizeof(key));
+		kv.JumpToKey(key, true);
+		kv.SetNum("hammer", g_ln_placeHammer[k]);
+		kv.SetVector("from", g_ln_placeFrom[k]);
+		kv.SetVector("to", g_ln_placeTo[k]);
+		kv.GoBack();
+	}
+	kv.Rewind();
 	kv.JumpToKey("style", true);
 	kv.SetFloat("shoot_sum", g_ln_shootSum);
 	kv.SetNum("shoot_n", g_ln_shootN);
@@ -149,4 +180,27 @@ stock float Learned_ShootDist(float fallback)
 stock float Learned_RetreatDist(float fallback)
 {
 	return g_ln_retreatN >= 10 ? g_ln_retreatSum / float(g_ln_retreatN) : fallback;
+}
+
+// The prop a placement is about, this round: by hammer ID, else the prop nearest to where it
+// starts. -1 if it's gone (broken).
+stock int Learned_FindPlaceProp(int k)
+{
+	static const char classes[][] = { "prop_physics_multiplayer", "prop_physics", "prop_physics_override", "prop_physics_respawnable" };
+	int best = -1;
+	float bestDist = 32.0;
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int ent = -1;
+		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
+		{
+			if (g_ln_placeHammer[k] > 0 && HasEntProp(ent, Prop_Data, "m_iHammerID") && GetEntProp(ent, Prop_Data, "m_iHammerID") == g_ln_placeHammer[k])
+				return ent;
+			float pos[3];
+			GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", pos);
+			float d = GetVectorDistance(pos, g_ln_placeFrom[k]);
+			if (d < bestDist) { bestDist = d; best = ent; }
+		}
+	}
+	return best;
 }

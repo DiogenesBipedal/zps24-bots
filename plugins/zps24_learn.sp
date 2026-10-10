@@ -5,6 +5,8 @@
 //   routes      paths between floors over ground the nav mesh doesn't cover (steep stairs,
 //               jumps, climbs): from the last point on the mesh to the first point back on it
 //   style       how far the nearest zombie is when they open fire, and when they back away
+//   furniture   which pieces they move (shove or carry) and where they leave them: the
+//               survivor bots' barricaders put the same pieces in the same places
 //
 // The survivor and zombie AI plugins read the file (include/zps24_learned.inc): survivors defend
 // from learned hold spots first, both teams walk learned routes, survivors copy the distances.
@@ -41,6 +43,13 @@ float g_trail[MAXPLAYERS + 1][32][3];        // off-mesh path being recorded
 float g_trailSince[MAXPLAYERS + 1];
 bool  g_trailBad[MAXPLAYERS + 1];            // ladder or noclip on the way: not walkable by bots
 bool  g_wasShooting[MAXPLAYERS + 1];
+
+// Furniture near the teacher, watched for being moved
+#define MAX_TRACK 32
+int   g_trk[MAX_TRACK];                      // entity references
+float g_trkStart[MAX_TRACK][3];              // where it was before this move
+float g_trkLast[MAX_TRACK][3];               // last tick
+bool  g_trkMoved[MAX_TRACK];                 // moved while the teacher was next to it
 bool  g_wasRetreating[MAXPLAYERS + 1];
 
 public void OnPluginStart()
@@ -59,6 +68,8 @@ public void OnMapStart()
 	Learned_Load();
 	for (int i = 0; i <= MaxClients; i++)
 		ResetClient(i);
+	for (int t = 0; t < MAX_TRACK; t++)
+		g_trk[t] = INVALID_ENT_REFERENCE;
 	CreateTimer(TICK, Timer_Watch, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
@@ -225,6 +236,111 @@ bool IsTeacher(int client)
 	return (GetUserFlagBits(client) & (ADMFLAG_ROOT | ADMFLAG_GENERIC)) != 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Furniture the teacher moves
+
+int HammerID(int ent)
+{
+	return HasEntProp(ent, Prop_Data, "m_iHammerID") ? GetEntProp(ent, Prop_Data, "m_iHammerID") : 0;
+}
+
+void TrackFurnitureNear(const float pos[3])
+{
+	static const char classes[][] = { "prop_physics_multiplayer", "prop_physics", "prop_physics_override", "prop_physics_respawnable" };
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int ent = -1;
+		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
+		{
+			float p[3];
+			GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", p);
+			if (GetVectorDistance(p, pos) > 110.0)
+				continue;
+			int ref = EntIndexToEntRef(ent), free = -1;
+			bool known = false;
+			for (int t = 0; t < MAX_TRACK; t++)
+			{
+				if (g_trk[t] == ref) { known = true; break; }
+				if (free == -1 && EntRefToEntIndex(g_trk[t]) == INVALID_ENT_REFERENCE) free = t;
+			}
+			if (known || free == -1)
+				continue;
+			g_trk[free] = ref;
+			g_trkStart[free] = p;
+			g_trkLast[free] = p;
+			g_trkMoved[free] = false;
+		}
+	}
+}
+
+// A tracked prop that moved with the teacher next to it and has come to rest: a placement.
+void UpdateTracked(int teacher)
+{
+	float me[3];
+	GetClientAbsOrigin(teacher, me);
+	for (int t = 0; t < MAX_TRACK; t++)
+	{
+		int ent = EntRefToEntIndex(g_trk[t]);
+		if (ent == INVALID_ENT_REFERENCE)
+			continue;
+		float p[3];
+		GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", p);
+		float step = GetVectorDistance(p, g_trkLast[t]);
+		g_trkLast[t] = p;
+		if (step > 2.0)
+		{
+			if (GetVectorDistance(p, me) < 160.0)
+				g_trkMoved[t] = true;          // the teacher is moving it
+			else if (!g_trkMoved[t])
+				g_trkStart[t] = p;             // something else moved it (a zombie, physics)
+			continue;
+		}
+		if (g_trkMoved[t] && GetVectorDistance(p, g_trkStart[t]) >= 48.0)
+			RecordPlacement(ent, g_trkStart[t], p);
+		g_trkMoved[t] = false;
+		g_trkStart[t] = p;
+		if (GetVectorDistance(p, me) > 500.0)
+			g_trk[t] = INVALID_ENT_REFERENCE;   // out of the teacher's way: stop watching
+	}
+}
+
+void RecordPlacement(int ent, const float from[3], const float to[3])
+{
+	int hammer = HammerID(ent);
+	int k = -1;
+	for (int i = 0; i < g_ln_placeCount; i++)
+		if ((hammer > 0 && g_ln_placeHammer[i] == hammer) || (hammer == 0 && GetVectorDistance(g_ln_placeTo[i], from) < 16.0))
+		{
+			k = i;
+			break;
+		}
+	if (k == -1)
+	{
+		if (g_ln_placeCount >= LEARN_MAX_PLACES)
+			return;
+		k = g_ln_placeCount++;
+		g_ln_placeHammer[k] = hammer;
+		g_ln_placeFrom[k] = from;               // where it starts the round
+	}
+	if (GetVectorDistance(to, g_ln_placeFrom[k]) < 48.0)
+	{
+		// Put back where it started: forget it.
+		g_ln_placeCount--;
+		for (int i = k; i < g_ln_placeCount; i++)
+		{
+			g_ln_placeHammer[i] = g_ln_placeHammer[i + 1];
+			g_ln_placeFrom[i] = g_ln_placeFrom[i + 1];
+			g_ln_placeTo[i] = g_ln_placeTo[i + 1];
+		}
+		Learned_Save();
+		return;
+	}
+	g_ln_placeTo[k] = to;
+	Learned_Save();
+	Note("Learned furniture placement %d (prop hammer ID %d): %.0f %.0f %.0f -> %.0f %.0f %.0f", k, hammer,
+		g_ln_placeFrom[k][0], g_ln_placeFrom[k][1], g_ln_placeFrom[k][2], to[0], to[1], to[2]);
+}
+
 Action Timer_Watch(Handle timer)
 {
 	if (!g_enable.BoolValue || !LibraryExists("navbot") || !NavBotNavMesh.IsLoaded())
@@ -241,6 +357,13 @@ Action Timer_Watch(Handle timer)
 		MoveType mt = GetEntityMoveType(client);
 		float pos[3];
 		GetClientAbsOrigin(client, pos);
+
+		// Furniture (as a survivor)
+		if (survivor)
+		{
+			TrackFurnitureNear(pos);
+			UpdateTracked(client);
+		}
 
 		// Hold spots (as a survivor)
 		if (survivor && (g_anchorSince[client] == 0.0 || GetVectorDistance(pos, g_anchor[client]) > 80.0))
@@ -331,8 +454,8 @@ Action Timer_Watch(Handle timer)
 
 Action Cmd_Status(int args)
 {
-	PrintToServer("[learn] %d hold spots, %d routes; opened fire at %.0f on average (%d times), backed away at %.0f (%d times)",
-		g_ln_spotCount, g_ln_routeCount, g_ln_shootN ? g_ln_shootSum / float(g_ln_shootN) : 0.0, g_ln_shootN,
+	PrintToServer("[learn] %d hold spots, %d routes, %d furniture placements; opened fire at %.0f on average (%d times), backed away at %.0f (%d times)",
+		g_ln_spotCount, g_ln_routeCount, g_ln_placeCount, g_ln_shootN ? g_ln_shootSum / float(g_ln_shootN) : 0.0, g_ln_shootN,
 		g_ln_retreatN ? g_ln_retreatSum / float(g_ln_retreatN) : 0.0, g_ln_retreatN);
 	for (int i = 0; i < g_ln_spotCount; i++)
 		PrintToServer("  spot %d at %.0f %.0f %.0f held %.0f s", i, g_ln_spots[i][0], g_ln_spots[i][1], g_ln_spots[i][2], g_ln_spotSecs[i]);
@@ -343,6 +466,9 @@ Action Cmd_Status(int args)
 			g_ln_routes[r][0][0], g_ln_routes[r][0][1], g_ln_routes[r][0][2],
 			g_ln_routes[r][last][0], g_ln_routes[r][last][1], g_ln_routes[r][last][2], g_ln_routeLen[r], g_ln_routeUses[r]);
 	}
+	for (int k = 0; k < g_ln_placeCount; k++)
+		PrintToServer("  furniture %d (hammer ID %d): %.0f %.0f %.0f -> %.0f %.0f %.0f", k, g_ln_placeHammer[k],
+			g_ln_placeFrom[k][0], g_ln_placeFrom[k][1], g_ln_placeFrom[k][2], g_ln_placeTo[k][0], g_ln_placeTo[k][1], g_ln_placeTo[k][2]);
 	return Plugin_Handled;
 }
 
@@ -350,6 +476,7 @@ Action Cmd_Forget(int args)
 {
 	g_ln_spotCount = 0;
 	g_ln_routeCount = 0;
+	g_ln_placeCount = 0;
 	g_ln_shootSum = 0.0; g_ln_retreatSum = 0.0;
 	g_ln_shootN = 0; g_ln_retreatN = 0;
 	Learned_Save();

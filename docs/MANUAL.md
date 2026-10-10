@@ -1391,6 +1391,18 @@ Learning from everyone would mix good habits with bad ones.
    more than 0.7 of their speed, within 600 units). Only the *start* of each action counts, so
    holding the trigger for three seconds is one sample, not twelve.
 
+4. **Furniture placements** (added after the first test sessions, "continue learning"):
+   - **Watch:** every physics prop that comes within 110 units of the teacher is watched (up
+     to 32 at a time).
+   - **Who moved it:** when a watched prop moves while the teacher is within 160 units, it's
+     the teacher moving it; anything else moving it (a zombie, physics) just updates its start.
+   - **Record:** once it comes to rest 48+ units from where it started, that's a placement:
+     which prop, where it started the round, where the teacher left it.
+   - **Recognize it next round:** by its `m_iHammerID`, the ID the map editor gave it, the same
+     every round even though entity indexes change. Props without one are matched by start
+     position.
+   - **Undo:** putting a prop back where it started forgets the placement.
+
 The file is a KeyValues text file per map in `data/zps24_learn/`, readable and editable by hand.
 
 **How the bots use it** (`include/zps24_learned.inc`, loaded at map and round start):
@@ -1406,6 +1418,11 @@ The file is a KeyValues text file per map in `data/zps24_learn/`, readable and e
   The cheapest one wins (distance to its start, half the distance from its end, plus the
   height left over). Zombies use them to chase, and survivors use them to reach their defend
   spot, which also gives survivors the church tower's hand-made stair routes at last.
+- **Furniture placements:** a new job type, `JOB_PLACE`. When a house's furniture-pushers are
+  handed out, they first take the teacher's placements in that house, then the doors. The
+  shoving code from 11.6 became one function, `PushProp(prop, destination)`, shared by both
+  jobs. Pieces the teacher uses are reserved: door barricaders don't take them, and bots
+  walking past don't shove them aside once they're in place.
 - **Fighting distances:** with 20+ shooting samples, the engage range becomes the player's
   average plus 15% (kept within 250 to 1200 units). With 10+ back-off samples, the safe
   distance becomes the player's average (120 to 500).

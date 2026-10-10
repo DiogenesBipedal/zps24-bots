@@ -94,9 +94,13 @@ float g_badHoldout[8][3];                // homes we were overrun at this round
 int   g_badHoldoutCount;
 
 // Per-bot state
-enum BotJob { JOB_NONE, JOB_BARRICADE }
+enum BotJob { JOB_NONE, JOB_BARRICADE, JOB_PLACE }   // JOB_PLACE: copy a learned furniture placement
 BotJob g_job[MAXPLAYERS + 1];
 int    g_jobOpening[MAXPLAYERS + 1];
+int    g_jobPlace[MAXPLAYERS + 1];       // learned placement being copied (JOB_PLACE)
+int    g_placeHome[LEARN_MAX_PLACES];    // home a learned furniture placement belongs to this round (-1 = none)
+int    g_placeClaim[LEARN_MAX_PLACES];
+bool   g_placeDone[LEARN_MAX_PLACES];
 float  g_jobStarted[MAXPLAYERS + 1];
 int    g_aimTry[MAXPLAYERS + 1];
 float  g_hammerUntil[MAXPLAYERS + 1];
@@ -271,6 +275,9 @@ void CheckOverrun()
 void AbandonHome(int h)
 {
 	g_homeValid[h] = false;
+	for (int k = 0; k < LEARN_MAX_PLACES; k++)
+		if (g_placeHome[k] == h)
+			g_placeHome[k] = -1;
 	for (int o = 0; o < g_openingCount; o++)
 		if (g_openingHome[o] == h)
 			g_openingHome[o] = -1;
@@ -290,6 +297,12 @@ void ResetRound()
 	g_badHoldoutCount = 0;
 	g_badPropCount = 0;
 	g_roundStart = GetGameTime();
+	for (int k = 0; k < LEARN_MAX_PLACES; k++)
+	{
+		g_placeHome[k] = -1;
+		g_placeClaim[k] = 0;
+		g_placeDone[k] = false;
+	}
 	for (int i = 0; i <= MaxClients; i++)
 	{
 		g_job[i] = JOB_NONE;
@@ -548,6 +561,9 @@ int CreateHome(const float from[3])
 		return -1;
 	}
 	g_homeValid[h] = true;
+	for (int k = 0; k < g_ln_placeCount; k++)
+		if (g_placeHome[k] == -1 && GetVectorDistance(g_ln_placeTo[k], g_homePos[h]) < g_radius.FloatValue * 1.3)
+			g_placeHome[k] = h;
 	g_homeChosenAt[h] = GetGameTime();
 	g_homeDeaths[h] = 0;
 	Debug("Home %d at %.0f %.0f %.0f with %d doors/windows (%d on the map)", h, g_homePos[h][0], g_homePos[h][1], g_homePos[h][2], members, count);
@@ -870,11 +886,33 @@ int ClaimOpening(int client)
 	return best;
 }
 
+// A furniture placement the main player made in the bot's home, not done yet.
+int ClaimPlacement(int client)
+{
+	int h = g_home[client];
+	if (h < 0)
+		return -1;
+	float me[3];
+	GetClientAbsOrigin(client, me);
+	int best = -1;
+	float bestDist = 999999.0;
+	for (int k = 0; k < g_ln_placeCount; k++)
+	{
+		if (g_placeHome[k] != h || g_placeDone[k] || (g_placeClaim[k] != 0 && g_placeClaim[k] != client))
+			continue;
+		float d = GetVectorDistance(me, g_ln_placeTo[k]);
+		if (d < bestDist) { bestDist = d; best = k; }
+	}
+	if (best != -1)
+		g_placeClaim[best] = client;
+	return best;
+}
+
 int CountBarricaders(int h)
 {
 	int n = 0;
 	for (int i = 1; i <= MaxClients; i++)
-		if (g_job[i] == JOB_BARRICADE && g_home[i] == h && IsClientInGame(i) && IsPlayerAlive(i))
+		if (g_job[i] != JOB_NONE && g_home[i] == h && IsClientInGame(i) && IsPlayerAlive(i))
 			n++;
 	return n;
 }
@@ -882,6 +920,13 @@ int CountBarricaders(int h)
 void ReleaseJob(int client, bool done)
 {
 	int o = g_jobOpening[client];
+	int k = g_jobPlace[client];
+	if (g_job[client] == JOB_PLACE && k >= 0 && k < LEARN_MAX_PLACES)
+	{
+		g_placeClaim[k] = 0;
+		if (done)
+			g_placeDone[k] = true;
+	}
 	if (g_job[client] == JOB_BARRICADE && o >= 0 && o < g_openingCount)
 	{
 		g_openingClaim[o] = 0;
@@ -917,7 +962,8 @@ void StandPoint(int o, float out[3])
 	SnapToNav(raw, out);
 }
 
-// Barricade boards, and furniture already blocking a door: leave those alone.
+// Barricade boards, and furniture already blocking a door or where the main player puts it:
+// leave those alone.
 bool IsBarricadeProp(int ent)
 {
 	char model[128];
@@ -931,6 +977,9 @@ bool IsBarricadeProp(int ent)
 	GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", pos);
 	for (int o = 0; o < g_openingCount; o++)
 		if (!g_openingWindow[o] && g_openingHome[o] != -1 && GetVectorDistance(pos, g_openingPos[o]) < 90.0)
+			return true;
+	for (int k = 0; k < g_ln_placeCount; k++)          // where the main player puts furniture
+		if (GetVectorDistance(pos, g_ln_placeTo[k]) < 40.0)
 			return true;
 	return false;
 }
@@ -966,6 +1015,11 @@ int FindFurniture(int o, float maxDist)
 				continue;
 			GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", pos);
 			if (FloatAbs(pos[2] - g_openingPos[o][2]) > 90.0)     // same floor
+				continue;
+			bool reserved = false;                              // the main player uses it elsewhere
+			for (int k = 0; k < g_ln_placeCount && !reserved; k++)
+				reserved = GetVectorDistance(pos, g_ln_placeFrom[k]) < 32.0;
+			if (reserved)
 				continue;
 			// Must be indoors, on the home side of the door.
 			float rel[3];
@@ -1035,54 +1089,31 @@ Action Timer_ShoveImpulse(Handle timer, DataPack pack)
 	return Plugin_Stop;
 }
 
-// Shove a piece of furniture into a door of the home: stand behind it (the side away from the
-// door), bare hands out, right click, repeat. Furniture that doesn't get closer after several
-// shoves is too heavy; try another piece.
-bool DoFurniture(int client, NavBot bot, float moveGoal[3])
+#define PUSH_WORKING 0      // standing at it, shoving (hold still)
+#define PUSH_MOVING  1      // walking to the spot behind it (path to moveGoal)
+#define PUSH_DONE    2      // it's there
+#define PUSH_GIVEUP  3      // too heavy, wedged or out of reach
+
+// Shove a piece of furniture to `dest`: stand behind it (the side away from dest), bare hands
+// out, right click, repeat. Furniture that doesn't get closer after several shoves is too heavy.
+int PushProp(int client, NavBot bot, int prop, const float target[3], float moveGoal[3], float doneDist)
 {
-	int o = g_jobOpening[client];
-	float me[3];
+	float me[3], dest[3], propPos[3], center[3];
 	GetClientAbsOrigin(client, me);
-
-	int prop = EntRefToEntIndex(g_carryProp[client]);
-	if (prop == INVALID_ENT_REFERENCE)
-	{
-		prop = FindFurniture(o, 650.0);
-		if (prop == -1)
-		{
-			ReleaseJob(client, true);   // nothing to use here
-			return false;
-		}
-		g_carryProp[client] = EntIndexToEntRef(prop);
-		g_pushes[client] = 0;
-		g_pushStuck[client] = 0;
-		g_pushBest[client] = 999999.0;
-	}
-
-	// Where the furniture should end up: against the door, just inside.
-	float dest[3], propPos[3], center[3];
-	for (int i = 0; i < 3; i++)
-		dest[i] = g_openingPos[o][i] + g_openingInside[o][i] * 20.0;
 	GetEntPropVector(prop, Prop_Data, "m_vecAbsOrigin", propPos);
 	EntityCenter(prop, center);
+	dest = target;
 	dest[2] = propPos[2];
 	float d = GetVectorDistance(propPos, dest);
-	if (d < 45.0)
-	{
-		g_openingBoards[o]++;
-		Debug("%N shoved furniture into door %d (%d/%d)", client, o, g_openingBoards[o], g_boardsPerOpening.IntValue);
-		g_carryProp[client] = INVALID_ENT_REFERENCE;
-		if (g_openingBoards[o] >= g_boardsPerOpening.IntValue)
-			ReleaseJob(client, true);
-		return false;
-	}
+	if (d < doneDist)
+		return PUSH_DONE;
 	if (d < g_pushBest[client] - 8.0)
 	{
 		g_pushBest[client] = d;
 		g_pushStuck[client] = 0;
 	}
 
-	// Stand behind it, on the line from the door through the furniture.
+	// Stand behind it, on the line from the destination through the furniture.
 	float back[3], push[3];
 	SubtractVectors(propPos, dest, back);
 	back[2] = 0.0;
@@ -1094,7 +1125,7 @@ bool DoFurniture(int client, NavBot bot, float moveGoal[3])
 	{
 		SnapToNav(push, moveGoal);
 		if (GetVectorDistance(me, moveGoal) > 36.0)
-			return true;
+			return PUSH_MOVING;
 		// The push spot is off the mesh (furniture against a wall): shove from as close as we can.
 	}
 	// Bare hands only reach about 70 units: step in until the furniture is within reach.
@@ -1110,14 +1141,11 @@ bool DoFurniture(int client, NavBot bot, float moveGoal[3])
 		AddVectors(me, step, step);
 		if (++g_pushStuck[client] > 40)
 		{
-			if (g_badPropCount < sizeof(g_badProp))
-				g_badProp[g_badPropCount++] = g_carryProp[client];
-			Debug("%N: can't get within reach of furniture %d, trying another", client, prop);
-			g_carryProp[client] = INVALID_ENT_REFERENCE;
-			return false;
+			Debug("%N: can't get within reach of furniture %d", client, prop);
+			return PUSH_GIVEUP;
 		}
 		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), step, 100);
-		return false;
+		return PUSH_WORKING;
 	}
 
 	int before = g_pushes[client];
@@ -1128,13 +1156,92 @@ bool DoFurniture(int client, NavBot bot, float moveGoal[3])
 	NormalizeVector(toward, toward);
 	Shove(client, bot, center, prop, toward);
 	if (g_pushes[client] > before)
-		Debug("%N shove #%d: furniture %d is %.0f from door %d", client, g_pushes[client], prop, d, o);
+		Debug("%N shove #%d: furniture %d is %.0f from where it should go", client, g_pushes[client], prop, d);
 	if (g_pushes[client] > before && (g_pushStuck[client] += 6) > 36)
 	{
-		if (g_badPropCount < sizeof(g_badProp))
-			g_badProp[g_badPropCount++] = g_carryProp[client];
-		Debug("%N: furniture %d won't move, trying another", client, prop);
-		g_carryProp[client] = INVALID_ENT_REFERENCE;
+		Debug("%N: furniture %d won't move", client, prop);
+		return PUSH_GIVEUP;
+	}
+	return PUSH_WORKING;
+}
+
+void StartPush(int client, int prop)
+{
+	g_carryProp[client] = EntIndexToEntRef(prop);
+	g_pushes[client] = 0;
+	g_pushStuck[client] = 0;
+	g_pushBest[client] = 999999.0;
+}
+
+// Barricade a door of the home: shove the nearest suitable furniture against it, just inside.
+// Returns true while the bot should walk to moveGoal.
+bool DoFurniture(int client, NavBot bot, float moveGoal[3])
+{
+	int o = g_jobOpening[client];
+	int prop = EntRefToEntIndex(g_carryProp[client]);
+	if (prop == INVALID_ENT_REFERENCE)
+	{
+		prop = FindFurniture(o, 650.0);
+		if (prop == -1)
+		{
+			ReleaseJob(client, true);   // nothing to use here
+			return false;
+		}
+		StartPush(client, prop);
+	}
+	float dest[3];
+	for (int i = 0; i < 3; i++)
+		dest[i] = g_openingPos[o][i] + g_openingInside[o][i] * 20.0;
+	switch (PushProp(client, bot, prop, dest, moveGoal, 45.0))
+	{
+		case PUSH_MOVING: return true;
+		case PUSH_DONE:
+		{
+			g_openingBoards[o]++;
+			Debug("%N shoved furniture into door %d (%d/%d)", client, o, g_openingBoards[o], g_boardsPerOpening.IntValue);
+			g_carryProp[client] = INVALID_ENT_REFERENCE;
+			if (g_openingBoards[o] >= g_boardsPerOpening.IntValue)
+				ReleaseJob(client, true);
+		}
+		case PUSH_GIVEUP:
+		{
+			if (g_badPropCount < sizeof(g_badProp))
+				g_badProp[g_badPropCount++] = g_carryProp[client];
+			g_carryProp[client] = INVALID_ENT_REFERENCE;   // try another piece
+		}
+	}
+	return false;
+}
+
+// Put a piece of furniture where the main player put it (learned placement).
+bool DoPlace(int client, NavBot bot, float moveGoal[3])
+{
+	int k = g_jobPlace[client];
+	if (GetGameTime() - g_jobStarted[client] > 60.0)
+	{
+		ReleaseJob(client, true);
+		return false;
+	}
+	int prop = EntRefToEntIndex(g_carryProp[client]);
+	if (prop == INVALID_ENT_REFERENCE)
+	{
+		prop = Learned_FindPlaceProp(k);
+		if (prop == -1)
+		{
+			ReleaseJob(client, true);   // broken or gone this round
+			return false;
+		}
+		StartPush(client, prop);
+	}
+	switch (PushProp(client, bot, prop, g_ln_placeTo[k], moveGoal, 32.0))
+	{
+		case PUSH_MOVING: return true;
+		case PUSH_DONE:
+		{
+			Debug("%N put furniture where the main player puts it (placement %d)", client, k);
+			ReleaseJob(client, true);
+		}
+		case PUSH_GIVEUP: ReleaseJob(client, true);
 	}
 	return false;
 }
@@ -1398,7 +1505,7 @@ bool HasMainGun(int client)
 // starts, so they walked around with keyboards and brooms).
 void HoldBestGun(int client, NavBot bot)
 {
-	if (g_job[client] == JOB_BARRICADE || GetGameTime() < g_nextUse[client] || GetGameTime() < g_handsUntil[client])
+	if (g_job[client] != JOB_NONE || GetGameTime() < g_nextUse[client] || GetGameTime() < g_handsUntil[client])
 		return;
 	float zd;
 	if (NearestZombie(client, 600.0, zd) != 0)
@@ -1421,7 +1528,7 @@ bool ArmBot(int client, NavBot bot)
 	bool logNow = GetGameTime() - lastLog[client] > 5.0;
 	if (logNow) lastLog[client] = GetGameTime();
 
-	if (g_job[client] == JOB_BARRICADE || GetGameTime() < g_armPauseUntil[client])
+	if (g_job[client] != JOB_NONE || GetGameTime() < g_armPauseUntil[client])
 		return false;   // barricaders travel light; bots too heavy to take a gun wait a minute
 	if (!g_giveWeapons.BoolValue || HasMainGun(client))
 	{
@@ -1764,6 +1871,18 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		g_shoveUntil[client] = 0.0;
 	}
 
+	if (g_job[client] == JOB_PLACE)
+	{
+		if (DoPlace(client, bot, moveGoal))
+		{
+			strcopy(g_state[client], sizeof(g_state[]), "copying your furniture: walking");
+			routeType = NAVBOT_SAFEST_ROUTE;
+			return MoveTo(client, moveGoal);
+		}
+		strcopy(g_state[client], sizeof(g_state[]), "copying your furniture: shoving");
+		return Hold(client);
+	}
+
 	if (g_job[client] == JOB_BARRICADE)
 	{
 		if (DoBarricade(client, bot, moveGoal))
@@ -1913,6 +2032,18 @@ Action Timer_Think(Handle timer)
 			continue;
 
 		// Hand out barricade jobs.
+		if (g_job[client] == JOB_NONE && CountBarricaders(g_home[client]) < g_barricaders.IntValue)
+		{
+			int k = ClaimPlacement(client);
+			if (k != -1)
+			{
+				g_job[client] = JOB_PLACE;
+				g_jobPlace[client] = k;
+				g_jobStarted[client] = GetGameTime();
+				g_carryProp[client] = INVALID_ENT_REFERENCE;
+				Debug("%N copies the main player's furniture placement %d", client, k);
+			}
+		}
 		if (g_job[client] == JOB_NONE && CountBarricaders(g_home[client]) < g_barricaders.IntValue)
 		{
 			int o = ClaimOpening(client);

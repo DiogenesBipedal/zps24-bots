@@ -48,6 +48,10 @@ The bots watch one player, the host (server admins), and copy them. Per map, sav
   don't count.
 - **Fighting distances:** how far the nearest zombie is when you open fire, and when you start
   backing away. Survivor bots copy them after 20 and 10 samples.
+- **Furniture:** which pieces you shove or carry, and where you leave them (into a door, across
+  the stairs, anywhere). Each round, a house's furniture-pushers put the same pieces in the same
+  places before barricading the doors. Pieces are recognized by their map ID, so it works
+  across rounds; putting a piece back where it started forgets it.
 
 The bots pick up new lessons at the next round.
 
