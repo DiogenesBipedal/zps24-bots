@@ -52,9 +52,6 @@ The bots watch one player, the host (server admins), and copy them. Per map, sav
   the stairs, anywhere). Each round, a house's furniture-pushers put the same pieces in the same
   places before barricading the doors. Pieces are recognized by their map ID, so it works
   across rounds; putting a piece back where it started forgets it.
-- **Furniture as a zombie:** a piece you move as a zombie (a car pushed under a roof edge to
-  climb on) is a step: each round a zombie bot pushes it there, and the horde climbs your
-  route over it, jumping where you jumped.
 - **Entrances (as a zombie):** where you get into buildings, as the last point outside and the
   first point inside. Zombie bots attack houses through these first, more so the more often you
   used one.
@@ -69,6 +66,7 @@ The bots pick up new lessons at the next round.
 | `sm_zps24learn_debug` | 1 | Log each lesson to the SourceMod log |
 | `sm_zps24learn_status` | | What has been learned on this map |
 | `sm_zps24learn_forget` | | Forget this map's lessons |
+| `sm_zps24learn_drop <spot\|route\|furniture\|entry> <n>` | | Forget one lesson (numbers from `sm_zps24learn_status`) |
 
 ## Zombie bots (zps24_zombies)
 

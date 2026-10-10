@@ -1452,6 +1452,35 @@ The file is a KeyValues text file per map in `data/zps24_learn/`, readable and e
   heading through it. That last term spreads the horde over every way in, so survivors can't
   hold one door. At the entrance the zombie pushes through to the inside point; anything in
   the way gets smashed or shoved.
+- **Windows first, then open the door from the inside** (the player's tactics, refined over a
+  play session):
+  - *The car trick was dropped.* Teaching zombies to push a car under a roof edge and climb
+    worked, but in practice they got "confused and inefficient". The lessons were removed with
+    a new `sm_zps24learn_drop` command, step-building is off (`sm_zps24zombies_build_steps 0`),
+    and furniture is only learned from survivors.
+  - *Ground-floor windows get a big bonus* when choosing an entrance. A window counts only if
+    its sill (the brush's bottom edge) is within a crouch-jump (56 units) of the ground outside.
+    At the window the zombie swings until the glass is gone (`m_bIsBroken`), swings one more
+    second to clear the shards, then climbs straight in, steering itself with jump + crouch.
+    Leaving it to the pathfinder would walk it round to a door.
+  - *Too strong or too slow?* After 8 s with the window intact (boarded, reinforced), the
+    window goes on a list shared by the horde and the zombie tries doors for 30 s.
+  - *Unbar from the inside.* Some doors are held shut by a physics object: on cabin, a plank
+    (`func_physbox`) on one door, a padlock prop on the double gate, furniture against
+    others. `sm_zps24_doorbars` lists them. A zombie that climbed in through a window looks for
+    the nearest barred door on its floor, walks up on the inside, alternates swing (planks
+    break) and shove with the push assist (padlocks and furniture move off the door), and
+    once nothing physical is within 75 units of the door, fires the door's `Unlock` and `Open`
+    inputs. The rest of the horde walks in.
+  - *Always go in.* An entrance is used whenever the zombie is outside and its survivor inside,
+    even if it can see them through the glass (rushing at them sent the pathfinder round to a
+    door).
+- **Survivors on ledges.** A survivor on a narrow ledge in the cabin's upstairs bedroom, 46
+  units above the floor, made zombies grind into the wall. In the nav mesh that ledge only has
+  connections leading off it, so a path can never end there. Goal areas must now be
+  *enterable* (some neighbour connects into them); the nearest is chosen by horizontal distance
+  first, so the floor right below wins. Close to a survivor who is 30+ units higher, a zombie
+  jumps (crouched) while swinging.
 - **Zombies shove furniture too** (right click with `weapon_arms`, the same push assist as
   survivors). Furniture that doesn't move goes on a list shared by the whole horde, so after
   the first zombie finds a fixed piece, the rest treat it like a wall.

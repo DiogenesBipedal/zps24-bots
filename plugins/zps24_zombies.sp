@@ -23,7 +23,7 @@ public Plugin myinfo =
 #define TEAM_SURVIVORS 2
 #define TEAM_ZOMBIES   3
 
-ConVar g_enable, g_debug, g_forceTarget;
+ConVar g_enable, g_debug, g_forceTarget, g_buildSteps;
 bool   g_scripted[MAXPLAYERS + 1];
 int    g_target[MAXPLAYERS + 1];
 float  g_retarget[MAXPLAYERS + 1];
@@ -51,6 +51,15 @@ float  g_entryIn[MAXPLAYERS + 1][3];     // a point just inside
 float  g_entryInUntil[MAXPLAYERS + 1];   // pushing through to the inside point until then
 float  g_entryCooldown[MAXPLAYERS + 1];
 float  g_entryChosen[MAXPLAYERS + 1];
+int    g_entryEnt[MAXPLAYERS + 1];       // the window/door of the entrance (entity reference), or -1
+bool   g_entryWindow[MAXPLAYERS + 1];    // a ground-floor window: smash it, then climb straight through
+float  g_entrySmashUntil[MAXPLAYERS + 1];
+float  g_entryClearAt[MAXPLAYERS + 1];   // when the window was found broken
+float  g_doorsOnlyUntil[MAXPLAYERS + 1]; // a window took too long: break in through a door instead
+int    g_unbarDoor[MAXPLAYERS + 1];      // door being unbarred from the inside (entity reference), or -1
+float  g_unbarUntil[MAXPLAYERS + 1];
+int    g_toughWin[32];                   // windows no zombie got through this round (shared by the horde)
+int    g_toughWinCount;
 int    g_ignore[MAXPLAYERS + 1][4];      // obstacles that didn't break when hit (entity refs)
 float  g_ignoreUntil[MAXPLAYERS + 1][4];
 float  g_goal[MAXPLAYERS + 1][3];        // where we're heading to reach g_target
@@ -64,7 +73,9 @@ public void OnPluginStart()
 {
 	g_enable = CreateConVar("sm_zps24zombies_enable", "1", "Enable the ZPS 2.4 zombie AI");
 	g_debug  = CreateConVar("sm_zps24zombies_debug", "0", "Log zombie AI decisions");
+	g_buildSteps = CreateConVar("sm_zps24zombies_build_steps", "0", "Zombie bots push furniture the main player moved as a zombie into place (steps up to roofs)");
 	g_forceTarget = CreateConVar("sm_zps24zombies_force_target", "0", "Debug: every zombie hunts this client index (0 = normal)");
+	RegServerCmd("sm_zps24_doorbars", Cmd_DoorBars, "List physics props right next to doors (planks barring them)");
 	RegServerCmd("sm_zps24_doorlinks", Cmd_DoorLinks, "Connect the nav areas on both sides of every door again and report");
 	AutoExecConfig(true, "zps24_zombies");
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
@@ -73,6 +84,7 @@ public void OnPluginStart()
 void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 {
 	g_fixedCount = 0;                   // props respawn every round
+	g_toughWinCount = 0;
 	Stairs_Relearn();
 	ResetPlacements();
 }
@@ -85,7 +97,11 @@ public void OnMapStart()
 		g_smash[i] = INVALID_ENT_REFERENCE;
 		g_shove[i] = INVALID_ENT_REFERENCE;
 		g_hasEntry[i] = false;
+		g_entrySmashUntil[i] = 0.0;
+		g_doorsOnlyUntil[i] = 0.0;
+		g_unbarDoor[i] = INVALID_ENT_REFERENCE;
 		g_fixedCount = 0;
+		g_toughWinCount = 0;
 		g_entryInUntil[i] = 0.0;
 		g_entryCooldown[i] = 0.0;
 		g_goalTime[i] = 0.0;
@@ -173,6 +189,24 @@ void MarkDeadEnd(int client, Address area)
 	g_deadEndUntil[client][slot] = GetGameTime() + 20.0;
 }
 
+// Can a bot walk into this area at all? Some ledges and sills only have connections leading
+// away from them (drops), so a path can never end there and a zombie heading for one grinds
+// into the wall below it.
+bool IsEnterable(Address a)
+{
+	for (int d = 0; d < 4; d++)
+	{
+		int n = NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
+		for (int k = 0; k < n; k++)
+		{
+			Address b = NavBotNavArea.GetAdjacentArea(a, view_as<NavBotNavDirType>(d), k);
+			if (b != Address_Null && NavBotNavArea.IsConnectedToAny(b, a))
+				return true;
+		}
+	}
+	return NavBotNavArea.GetOffMeshConnectionCount(a) > 0;
+}
+
 // Where to walk to reach a survivor. Aim at the survivor's own floor: the raw position snaps to
 // whatever nav area is nearest, which for someone upstairs is often the floor below, and for
 // someone hiding where the mesh doesn't reach (a closet, on furniture, a nook) is often the room
@@ -187,7 +221,7 @@ void ComputeGoal(int client, int target, float goal[3])
 	probe[2] += 16.0;
 
 	Address area = NavBotNavMesh.GetNearestNavArea(probe, 150.0, true, true);
-	if (area != Address_Null && !IsDeadEnd(client, area))
+	if (area != Address_Null && !IsDeadEnd(client, area) && IsEnterable(area))
 	{
 		NavBotNavArea.GetClosestPointOnArea(area, pos, goal);
 		return;
@@ -202,10 +236,13 @@ void ComputeGoal(int client, int target, float goal[3])
 	for (int i = 0; i < areas.Size; i++)
 	{
 		Address a = areas.At(i);
-		if (IsDeadEnd(client, a))
+		if (IsDeadEnd(client, a) || !IsEnterable(a))
 			continue;
 		NavBotNavArea.GetClosestPointOnArea(a, pos, spot);
-		float d = GetVectorDistance(spot, pos);
+		// Horizontal distance first: for a survivor up on a ledge or a bed, the floor right
+		// below is the place to attack from.
+		float dx = spot[0] - pos[0], dy = spot[1] - pos[1];
+		float d = SquareRoot(dx * dx + dy * dy) + FloatAbs(spot[2] - pos[2]) * 0.3;
 		if (d >= bestDist || !NavBotNavArea.IsVisible(a, eye))
 			continue;
 		best = a;
@@ -227,6 +264,34 @@ void ComputeGoal(int client, int target, float goal[3])
 		}
 	}
 	goal = pos;
+}
+
+bool IsToughWindow(int ent)
+{
+	int ref = EntIndexToEntRef(ent);
+	for (int i = 0; i < g_toughWinCount; i++)
+		if (g_toughWin[i] == ref)
+			return true;
+	return false;
+}
+
+// Height of a window's bottom edge.
+float WindowSill(int ent)
+{
+	float origin[3], mins[3];
+	GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", origin);
+	GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+	return origin[2] + mins[2];
+}
+
+// Is this window still in the way? (Gone, or its glass shattered, means open.)
+bool WindowIntact(int ent)
+{
+	if (ent == INVALID_ENT_REFERENCE || !IsValidEntity(ent))
+		return false;
+	if (HasEntProp(ent, Prop_Send, "m_bIsBroken") && GetEntProp(ent, Prop_Send, "m_bIsBroken"))
+		return false;
+	return true;
 }
 
 // How many other zombies already use this entrance.
@@ -263,6 +328,8 @@ bool ChooseEntry(int client, const float target[3])
 			found = true;
 			g_entryOut[client] = g_ln_entryOut[e];
 			g_entryIn[client] = g_ln_entryIn[e];
+			g_entryEnt[client] = -1;
+			g_entryWindow[client] = false;
 		}
 	}
 
@@ -291,13 +358,26 @@ bool ChooseEntry(int client, const float target[3])
 			if (area == Address_Null)
 				continue;
 			NavBotNavArea.GetClosestPointOnArea(area, out, out);
-			float cost = d + 300.0 * float(EntryLoad(client, out));
+			// Ground-floor windows first: smash the glass and climb straight in, no walking round
+			// to a door. "Ground floor": the sill no higher than a crouch-jump from outside.
+			bool window = c >= 3;
+			if (window && (GetGameTime() < g_doorsOnlyUntil[client] || IsToughWindow(ent)))
+				continue;                    // too strong or too slow last time: doors instead
+			if (window)
+			{
+				float sill = WindowSill(ent);
+				if (sill - out[2] > 56.0)
+					continue;                // too high to climb in
+			}
+			float cost = d + 300.0 * float(EntryLoad(client, out)) - (window ? 400.0 : 0.0);
 			if (cost < bestCost)
 			{
 				bestCost = cost;
 				found = true;
 				g_entryOut[client] = out;
 				g_entryIn[client] = inside;
+				g_entryEnt[client] = EntIndexToEntRef(ent);
+				g_entryWindow[client] = window;
 			}
 		}
 	}
@@ -309,44 +389,237 @@ bool ChooseEntry(int client, const float target[3])
 	return found;
 }
 
-// Breaking in: walk to the chosen entrance, then push through it (whatever is in the way gets
-// smashed or shoved by the obstacle code). Returns true when it set moveGoal.
-bool UpdateEntry(int client, const float me[3], const float target[3], bool sees, float moveGoal[3])
+#define ENTRY_NONE  0
+#define ENTRY_PATH  1      // moveGoal set: path there
+#define ENTRY_STEER 2      // steering the bot ourselves (no pathing)
+
+// ---------------------------------------------------------------------------------------------
+// Unbarring a door from the inside: in through a window, then knock away the plank (or padlock,
+// or furniture) holding a door shut and open it for the horde.
+
+// A physics object right on a door, holding it shut: a plank (func_physbox), a padlock, furniture.
+int DoorBar(int door)
 {
+	static const char props[][] = { "func_physbox", "func_physbox_multiplayer", "prop_physics_multiplayer", "prop_physics", "prop_physics_override" };
+	float dc[3];
+	CenterOf(door, dc);
+	int best = -1;
+	float bestDist = 75.0;
+	for (int k = 0; k < sizeof(props); k++)
+	{
+		int p = -1;
+		while ((p = FindEntityByClassname(p, props[k])) != -1)
+		{
+			float pc[3];
+			CenterOf(p, pc);
+			float d = GetVectorDistance(pc, dc);
+			if (d < bestDist) { bestDist = d; best = p; }
+		}
+	}
+	return best;
+}
+
+// After climbing in: the nearest barred door of this house, on our floor.
+void StartUnbar(int client, const float me[3])
+{
+	static const char doors[][] = { "func_door_rotating", "prop_door_rotating", "func_door" };
+	int best = -1;
+	float bestDist = 700.0;
+	for (int c = 0; c < sizeof(doors); c++)
+	{
+		int door = -1;
+		while ((door = FindEntityByClassname(door, doors[c])) != -1)
+		{
+			float dc[3];
+			CenterOf(door, dc);
+			if (FloatAbs(dc[2] - me[2]) > 100.0 || DoorBar(door) == -1)
+				continue;
+			float d = GetVectorDistance(dc, me);
+			if (d < bestDist) { bestDist = d; best = door; }
+		}
+	}
+	if (best == -1)
+		return;
+	g_unbarDoor[client] = EntIndexToEntRef(best);
+	g_unbarUntil[client] = GetGameTime() + 20.0;
+	Debug("%N is inside: unbarring door %d", client, best);
+}
+
+// Knock the bar off the door (shove + swing, with the push assist, away from the door), then
+// open it. Returns ENTRY_* like UpdateEntry.
+int UpdateUnbar(int client, NavBot bot, const float me[3], float moveGoal[3])
+{
+	int door = EntRefToEntIndex(g_unbarDoor[client]);
+	if (door == INVALID_ENT_REFERENCE || GetGameTime() > g_unbarUntil[client])
+	{
+		g_unbarDoor[client] = INVALID_ENT_REFERENCE;
+		return ENTRY_NONE;
+	}
+	float dc[3];
+	CenterOf(door, dc);
+	int bar = DoorBar(door);
+	if (bar == -1)
+	{
+		// Clear: open it for the others.
+		AcceptEntityInput(door, "Unlock", client, client);
+		AcceptEntityInput(door, "Open", client, client);
+		Debug("%N unbarred and opened door %d", client, door);
+		g_unbarDoor[client] = INVALID_ENT_REFERENCE;
+		return ENTRY_NONE;
+	}
+	float bc[3], eye[3];
+	CenterOf(bar, bc);
+	GetClientEyePosition(client, eye);
+	if (GetVectorDistance(eye, bc) > 80.0)
+	{
+		// Walk up to it on our (inside) side.
+		float side[3];
+		SubtractVectors(me, dc, side);
+		side[2] = 0.0;
+		NormalizeVector(side, side);
+		ScaleVector(side, 50.0);
+		AddVectors(bc, side, moveGoal);
+		moveGoal[2] = me[2];
+		Address area = NavBotNavMesh.GetNearestNavArea(moveGoal, 150.0, false, true);
+		if (area != Address_Null)
+			NavBotNavArea.GetClosestPointOnArea(area, moveGoal, moveGoal);
+		if (GetVectorDistance(me, moveGoal) > 30.0)
+			return ENTRY_PATH;
+		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), bc, 100);
+		return ENTRY_STEER;
+	}
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, bc, LOOK_PRIORITY, 0.4, "Knocking the bar off a door");
+	if (GetGameTime() >= g_nextShove[client] && NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+	{
+		// Alternate swing (breaks wooden planks) and shove (moves padlocks and furniture).
+		bool shove = RoundToFloor(GetGameTime()) % 2 == 0;
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, shove ? NAVBOT_BUTTON_ATTACKSEC : NAVBOT_BUTTON_ATTACKPRIM, 0.2);
+		g_nextShove[client] = GetGameTime() + 0.7;
+		float dir[3];
+		SubtractVectors(bc, dc, dir);        // off the door, into the room or along the wall
+		dir[2] = 0.0;
+		if (GetVectorLength(dir) < 1.0)
+			SubtractVectors(me, dc, dir);
+		dir[2] = 0.0;
+		NormalizeVector(dir, dir);
+		DataPack pack;
+		CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
+		pack.WriteCell(EntIndexToEntRef(bar));
+		pack.WriteFloat(dir[0]);
+		pack.WriteFloat(dir[1]);
+	}
+	return ENTRY_STEER;
+}
+
+
+// Breaking in: walk to the chosen entrance, then through it. Doors: path to the inside point
+// (whatever is in the way gets smashed or shoved by the obstacle code). Ground-floor windows:
+// smash the glass, keep hitting until it's clear, then climb straight in (jump + crouch),
+// without the pathfinder sending us round to a door.
+int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3], float moveGoal[3])
+{
+	Address ctrl = bot.GetPlayerControllerInterface();
 	if (GetGameTime() < g_entryInUntil[client])
 	{
-		moveGoal = g_entryIn[client];
-		if (GetVectorDistance(me, g_entryIn[client]) > 40.0)
-			return true;
-		g_entryInUntil[client] = 0.0;       // inside: hunt normally
-		return false;
+		if (GetVectorDistance(me, g_entryIn[client]) < 40.0)
+		{
+			g_entryInUntil[client] = 0.0;   // inside
+			if (g_entryWindow[client])
+				StartUnbar(client, me);      // came in through a window: open a barred door for the horde
+			return ENTRY_NONE;
+		}
+		if (!g_entryWindow[client])
+		{
+			moveGoal = g_entryIn[client];
+			return ENTRY_PATH;
+		}
+		float look[3];
+		look = g_entryIn[client];
+		look[2] += 40.0;
+		NavBotPlayerControllerInterface.AimAtPos(ctrl, look, LOOK_MOVEMENT, 0.3, "Climbing in");
+		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), g_entryIn[client], 100);
+		if (GetEntityFlags(client) & FL_ONGROUND)
+		{
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_JUMP, 0.1);
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_CROUCH, 0.6);
+		}
+		return ENTRY_STEER;
 	}
-	// Only from outside, for a target indoors and out of sight.
-	if (sees || Learned_Indoors(me) || !Learned_Indoors(target) || GetVectorDistance(me, target) < 250.0
-		|| GetGameTime() < g_entryCooldown[client])
+
+	// Smashing the window of our entrance.
+	if (GetGameTime() < g_entrySmashUntil[client])
+	{
+		int win = EntRefToEntIndex(g_entryEnt[client]);
+		if (!WindowIntact(win) && g_entryClearAt[client] == 0.0)
+			g_entryClearAt[client] = GetGameTime();
+		// Broken: a second more of swings clears the shards, then climb in.
+		if (g_entryClearAt[client] > 0.0 && GetGameTime() - g_entryClearAt[client] > 1.0)
+		{
+			g_entrySmashUntil[client] = 0.0;
+			g_entryInUntil[client] = GetGameTime() + 4.0;
+			g_entryCooldown[client] = GetGameTime() + 20.0;
+			Debug("%N climbs in through the window", client);
+			return ENTRY_STEER;
+		}
+		float c[3];
+		if (win != INVALID_ENT_REFERENCE && IsValidEntity(win))
+			CenterOf(win, c);
+		else
+			c = g_entryIn[client];
+		NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Smashing a window");
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.3);
+		return ENTRY_STEER;
+	}
+	if (g_entrySmashUntil[client] != 0.0)
+	{
+		// 8 s and the window still holds (boarded up, reinforced): too strong or too slow. Tell
+		// the horde, and break in through a door instead.
+		g_entrySmashUntil[client] = 0.0;
+		int win = EntRefToEntIndex(g_entryEnt[client]);
+		if (win != INVALID_ENT_REFERENCE && g_toughWinCount < sizeof(g_toughWin))
+			g_toughWin[g_toughWinCount++] = g_entryEnt[client];
+		g_doorsOnlyUntil[client] = GetGameTime() + 30.0;
+		g_hasEntry[client] = false;
+		g_entryCooldown[client] = 0.0;
+		Debug("%N: window too strong, going for a door", client);
+		return ENTRY_NONE;
+	}
+
+	// Whenever we're outside and the survivor is in a house: go in through a window (or a door),
+	// even if we can see them through the glass. Rushing straight at them sends the pathfinder
+	// round to whatever door it knows.
+	if (Learned_Indoors(me) || !Learned_Indoors(target) || GetGameTime() < g_entryCooldown[client])
 	{
 		g_hasEntry[client] = false;
-		return false;
+		return ENTRY_NONE;
 	}
 	if (!g_hasEntry[client] || GetGameTime() - g_entryChosen[client] > 30.0)
 	{
 		if (!ChooseEntry(client, target))
 		{
 			g_entryCooldown[client] = GetGameTime() + 5.0;
-			return false;
+			return ENTRY_NONE;
 		}
 	}
 	if (GetVectorDistance(me, g_entryOut[client]) > 60.0)
 	{
 		moveGoal = g_entryOut[client];
-		return true;
+		return ENTRY_PATH;
 	}
-	// At the entrance: through it.
+	// At the entrance.
 	g_hasEntry[client] = false;
+	if (g_entryWindow[client])
+	{
+		g_entrySmashUntil[client] = GetGameTime() + 8.0;
+		g_entryClearAt[client] = WindowIntact(EntRefToEntIndex(g_entryEnt[client])) ? 0.0 : GetGameTime() - 1.0;
+		Debug("%N smashes the window", client);
+		return ENTRY_STEER;
+	}
 	g_entryInUntil[client] = GetGameTime() + 8.0;
 	g_entryCooldown[client] = GetGameTime() + 20.0;
 	moveGoal = g_entryIn[client];
-	return true;
+	return ENTRY_PATH;
 }
 
 // Can this entity actually be broken? Big metal furniture is often a prop_physics with no
@@ -479,6 +752,8 @@ void ResetPlacements()
 // Hand each learned zombie placement that isn't in place yet to the nearest free zombie.
 void AssignPlacements()
 {
+	if (!g_buildSteps.BoolValue)
+		return;
 	for (int k = 0; k < g_ln_placeCount; k++)
 	{
 		if (g_ln_placeTeam[k] != TEAM_ZOMBIES || g_placeDone[k])
@@ -786,7 +1061,16 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 
 	// Target holed up in a building: attack through an entrance of our own.
-	if (UpdateEntry(client, me, target, sees, moveGoal))
+	int entry = UpdateUnbar(client, bot, me, moveGoal);
+	if (entry == ENTRY_NONE)
+		entry = UpdateEntry(client, bot, me, target, moveGoal);
+	if (entry == ENTRY_STEER)
+	{
+		g_blockedSince[client] = 0.0;
+		g_us_wantMove[client] = false;
+		return Plugin_Continue;
+	}
+	if (entry == ENTRY_PATH)
 	{
 		g_blockedSince[client] = 0.0;
 		routeType = NAVBOT_FASTEST_ROUTE;
@@ -797,6 +1081,15 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	// Close and in plain view: go straight for them.
 	if (sees && GetVectorDistance(me, target) < 200.0)
 	{
+		// Up on a ledge, a bed, a shelf: jump at them (crouched), swinging.
+		float dx = target[0] - me[0], dy = target[1] - me[1];
+		if (target[2] - me[2] > 30.0 && dx * dx + dy * dy < 90.0 * 90.0 && (GetEntityFlags(client) & FL_ONGROUND))
+		{
+			Address ctrl = bot.GetPlayerControllerInterface();
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_JUMP, 0.1);
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_CROUCH, 0.6);
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.3);
+		}
 		moveGoal = target;
 		g_blockedSince[client] = 0.0;
 		routeType = NAVBOT_FASTEST_ROUTE;
@@ -930,6 +1223,39 @@ int LinkDoors(bool verbose)
 		}
 	}
 	return linked;
+}
+
+Action Cmd_DoorBars(int args)
+{
+	static const char doors[][] = { "func_door_rotating", "prop_door_rotating", "func_door" };
+	static const char props[][] = { "prop_physics_multiplayer", "prop_physics", "prop_physics_override", "prop_physics_respawnable", "func_physbox", "func_physbox_multiplayer" };
+	for (int c = 0; c < sizeof(doors); c++)
+	{
+		int door = -1;
+		while ((door = FindEntityByClassname(door, doors[c])) != -1)
+		{
+			float dc[3];
+			CenterOf(door, dc);
+			for (int k = 0; k < sizeof(props); k++)
+			{
+				int p = -1;
+				while ((p = FindEntityByClassname(p, props[k])) != -1)
+				{
+					float pc[3];
+					CenterOf(p, pc);
+					if (GetVectorDistance(pc, dc) > 90.0)
+						continue;
+					char model[128] = "-";
+					if (HasEntProp(p, Prop_Data, "m_ModelName"))
+						GetEntPropString(p, Prop_Data, "m_ModelName", model, sizeof(model));
+					PrintToServer("door %d %s at %.0f %.0f %.0f state %d: %s %d %s at %.0f %.0f %.0f", door, doors[c], dc[0], dc[1], dc[2],
+						HasEntProp(door, Prop_Data, "m_toggle_state") ? GetEntProp(door, Prop_Data, "m_toggle_state") : -1,
+						props[k], p, model, pc[0], pc[1], pc[2]);
+				}
+			}
+		}
+	}
+	return Plugin_Handled;
 }
 
 Action Cmd_DoorLinks(int args)

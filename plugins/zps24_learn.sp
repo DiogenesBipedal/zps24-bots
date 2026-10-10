@@ -66,6 +66,7 @@ public void OnPluginStart()
 	g_teacher  = CreateConVar("sm_zps24learn_teacher", "", "Learn only from the player whose name contains this (empty = from server admins only)");
 	RegServerCmd("sm_zps24learn_status", Cmd_Status, "What the bots have learned on this map");
 	RegServerCmd("sm_zps24learn_forget", Cmd_Forget, "Forget everything learned on this map");
+	RegServerCmd("sm_zps24learn_drop", Cmd_Drop, "sm_zps24learn_drop <spot|route|furniture|entry> <index>: forget one lesson");
 	HookEventEx("player_death", Event_PlayerDeath, EventHookMode_Post);
 }
 
@@ -415,9 +416,12 @@ Action Timer_Watch(Handle timer)
 		if (GetClientButtons(client) & (IN_USE | IN_ATTACK2 | IN_ATTACK))
 			g_handsOn[client] = GetGameTime();
 
-		// Furniture (either team: survivors barricade, zombies build steps up to roofs)
-		TrackFurnitureNear(pos);
-		UpdateTracked(client);
+		// Furniture (as a survivor: barricades)
+		if (survivor)
+		{
+			TrackFurnitureNear(pos);
+			UpdateTracked(client);
+		}
 
 		// Hold spots (as a survivor)
 		if (survivor && (g_anchorSince[client] == 0.0 || GetVectorDistance(pos, g_anchor[client]) > 80.0))
@@ -539,5 +543,58 @@ Action Cmd_Forget(int args)
 	g_ln_shootN = 0; g_ln_retreatN = 0;
 	Learned_Save();
 	PrintToServer("[learn] forgot everything on this map");
+	return Plugin_Handled;
+}
+
+// Remove element i from parallel arrays by shifting the rest down.
+Action Cmd_Drop(int args)
+{
+	char what[16], num[8];
+	GetCmdArg(1, what, sizeof(what));
+	GetCmdArg(2, num, sizeof(num));
+	int i = StringToInt(num);
+	if (StrEqual(what, "spot") && i >= 0 && i < g_ln_spotCount)
+	{
+		for (int k = i; k < g_ln_spotCount - 1; k++) { g_ln_spots[k] = g_ln_spots[k + 1]; g_ln_spotSecs[k] = g_ln_spotSecs[k + 1]; }
+		g_ln_spotCount--;
+	}
+	else if (StrEqual(what, "route") && i >= 0 && i < g_ln_routeCount)
+	{
+		for (int k = i; k < g_ln_routeCount - 1; k++)
+		{
+			g_ln_routeLen[k] = g_ln_routeLen[k + 1];
+			g_ln_routeUses[k] = g_ln_routeUses[k + 1];
+			for (int p = 0; p < LEARN_MAX_POINTS; p++) g_ln_routes[k][p] = g_ln_routes[k + 1][p];
+		}
+		g_ln_routeCount--;
+	}
+	else if (StrEqual(what, "furniture") && i >= 0 && i < g_ln_placeCount)
+	{
+		for (int k = i; k < g_ln_placeCount - 1; k++)
+		{
+			g_ln_placeHammer[k] = g_ln_placeHammer[k + 1];
+			g_ln_placeFrom[k] = g_ln_placeFrom[k + 1];
+			g_ln_placeTo[k] = g_ln_placeTo[k + 1];
+			g_ln_placeTeam[k] = g_ln_placeTeam[k + 1];
+		}
+		g_ln_placeCount--;
+	}
+	else if (StrEqual(what, "entry") && i >= 0 && i < g_ln_entryCount)
+	{
+		for (int k = i; k < g_ln_entryCount - 1; k++)
+		{
+			g_ln_entryOut[k] = g_ln_entryOut[k + 1];
+			g_ln_entryIn[k] = g_ln_entryIn[k + 1];
+			g_ln_entryUses[k] = g_ln_entryUses[k + 1];
+		}
+		g_ln_entryCount--;
+	}
+	else
+	{
+		PrintToServer("usage: sm_zps24learn_drop <spot|route|furniture|entry> <index> (see sm_zps24learn_status)");
+		return Plugin_Handled;
+	}
+	Learned_Save();
+	PrintToServer("[learn] dropped %s %d", what, i);
 	return Plugin_Handled;
 }
