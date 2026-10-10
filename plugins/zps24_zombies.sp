@@ -394,11 +394,19 @@ bool ChooseEntry(int client, const float target[3])
 				continue;                    // too strong or too slow last time: doors instead
 			if (window)
 			{
+				// Ground floor only: the floor is at the same height outside and in (not a porch
+				// roof under an upstairs window), and the sill within a crouch-jump.
+				Address inArea = NavBotNavMesh.GetNearestNavArea(inside, 100.0, false, true);
+				if (inArea == Address_Null)
+					continue;
+				float inFloor[3];
+				NavBotNavArea.GetClosestPointOnArea(inArea, inside, inFloor);
 				float sill = WindowSill(ent);
-				if (sill - out[2] > 56.0)
-					continue;                // too high to climb in
+				if (FloatAbs(inFloor[2] - out[2]) > 24.0 || sill - out[2] > 56.0)
+					continue;
+				inside = inFloor;
 			}
-			float cost = d + 300.0 * float(EntryLoad(client, out)) - (window ? 400.0 : 0.0);
+			float cost = d + 500.0 * float(EntryLoad(client, out)) - (window ? 250.0 : 0.0);
 			if (cost < bestCost)
 			{
 				bestCost = cost;
@@ -568,8 +576,16 @@ int UpdateBreach(int client, NavBot bot, const float me[3], int target, float mo
 		}
 		return ENTRY_STEER;
 	}
-	// Phase 2: through the opening, climbing if it's a window or a boarded window.
-	if (GetVectorDistance(me, g_brSide[k][to]) < 40.0)
+	// Phase 2: through the opening, climbing if it's a window or a boarded window. Past most of
+	// the way across counts: then go and hunt.
+	float dir[3], rel[3];
+	SubtractVectors(g_brSide[k][to], g_brSide[k][from], dir);
+	dir[2] = 0.0;
+	float len = GetVectorLength(dir);
+	NormalizeVector(dir, dir);
+	SubtractVectors(me, g_brSide[k][from], rel);
+	rel[2] = 0.0;
+	if (GetVectorDistance(me, g_brSide[k][to]) < 40.0 || (len > 0.0 && GetVectorDotProduct(rel, dir) > len * 0.6))
 	{
 		g_br[client] = -1;
 		g_brCooldown[client] = GetGameTime() + 2.0;
@@ -717,9 +733,20 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 	Address ctrl = bot.GetPlayerControllerInterface();
 	if (GetGameTime() < g_entryInUntil[client])
 	{
-		if (GetVectorDistance(me, g_entryIn[client]) < 40.0)
+		// Through? Past most of the way from the outside point to the inside point (on the sill
+		// or just inside counts): stop climbing and go hunting.
+		float dir[3], rel[3];
+		SubtractVectors(g_entryIn[client], g_entryOut[client], dir);
+		dir[2] = 0.0;
+		float len = GetVectorLength(dir);
+		NormalizeVector(dir, dir);
+		SubtractVectors(me, g_entryOut[client], rel);
+		rel[2] = 0.0;
+		bool through = len > 0.0 && GetVectorDotProduct(rel, dir) > len * 0.6;
+		if (through || GetVectorDistance(me, g_entryIn[client]) < 40.0)
 		{
 			g_entryInUntil[client] = 0.0;   // inside
+			g_entryCooldown[client] = GetGameTime() + 45.0;   // hunt in here; no going back out to an entrance
 			if (g_entryWindow[client])
 				StartUnbar(client, me);      // came in through a window: open a barred door for the horde
 			return ENTRY_NONE;
