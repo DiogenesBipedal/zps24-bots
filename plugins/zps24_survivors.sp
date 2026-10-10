@@ -158,15 +158,21 @@ public void OnPluginStart()
 	g_furniture        = CreateConVar("sm_zps24ai_furniture", "1", "Barricaders without a barricade tool carry furniture to the openings");
 	AutoExecConfig(true, "zps24_survivors");
 
+	// The barricade hammer's own fit check. Optional: the Windows server.dll doesn't have it (the
+	// game never calls it, so the linker dropped it); without it bots barricade with furniture.
 	GameData gd = new GameData("zps24_ai.games");
-	if (gd == null)
-		SetFailState("Missing gamedata zps24_ai.games.txt");
-	StartPrepSDKCall(SDKCall_Entity);
-	if (!PrepSDKCall_SetFromConf(gd, SDKConf_Signature, "CanAttachBarricade"))
-		SetFailState("CanAttachBarricade not found");
-	PrepSDKCall_SetReturnInfo(SDKType_Bool, SDKPass_Plain);
-	g_canAttach = EndPrepSDKCall();
-	delete gd;
+	if (gd != null)
+	{
+		StartPrepSDKCall(SDKCall_Entity);
+		if (PrepSDKCall_SetFromConf(gd, SDKConf_Signature, "CanAttachBarricade"))
+		{
+			PrepSDKCall_SetReturnInfo(SDKType_Bool, SDKPass_Plain);
+			g_canAttach = EndPrepSDKCall();
+		}
+		delete gd;
+	}
+	if (g_canAttach == null)
+		LogMessage("CanAttachBarricade not available: barricading with furniture only");
 
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
 	HookEventEx("player_death", Event_PlayerDeath, EventHookMode_Post);
@@ -1312,6 +1318,8 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 
 	// 1. Get a barricade tool if we don't have one (dropping heavy items first).
 	int tool = FindOwnedWeapon(client, "weapon_barricade");
+	if (g_canAttach == null)
+		return g_furniture.BoolValue ? DoFurniture(client, bot, moveGoal) : false;   // no hammer support
 	if (tool == -1 && !g_needTool.BoolValue && g_furniture.BoolValue)
 		return DoFurniture(client, bot, moveGoal);   // no hammer needed: push furniture into the opening
 	if (tool == -1 && g_needTool.BoolValue)
