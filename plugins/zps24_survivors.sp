@@ -1543,6 +1543,20 @@ bool ArmBot(int client, NavBot bot)
 	}
 
 	int gun = EntRefToEntIndex(g_givenGun[client]);
+	// Not picked up after two tries: probably the weight limit. Drop the melee weapon in hand
+	// (keyboard, frying pan...) to make room.
+	if (gun != INVALID_ENT_REFERENCE && GetEntPropEnt(gun, Prop_Send, "m_hOwnerEntity") == -1 && g_armTries[client] == 2)
+	{
+		int held = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+		char hc[64] = "";
+		if (held > 0)
+			GetEntityClassname(held, hc, sizeof(hc));
+		if (held > 0 && !IsGun(held) && !StrEqual(hc, "weapon_emptyhand") && !StrEqual(hc, "weapon_phone"))
+		{
+			bot.DelayedFakeClientCommand("dropweapon");
+			Debug("%N drops %s to make room for a gun", client, hc);
+		}
+	}
 	if (gun != INVALID_ENT_REFERENCE && GetEntPropEnt(gun, Prop_Send, "m_hOwnerEntity") == -1 && ++g_armTries[client] > 5)
 	{
 		// Still on the floor after several E presses: the bot is at its weight limit.
@@ -1750,11 +1764,7 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		return Plugin_Stop;                      // let NavBot go collect ammo
 	}
 
-	if (ArmBot(client, bot))
-	{
-		strcopy(g_state[client], sizeof(g_state[]), "arming");
-		return Hold(client);
-	}
+	ArmBot(client, bot);                     // runs alongside whatever the bot does: no standing still for a gun
 	if (Unstick_Goal(client, moveGoal))
 	{
 		strcopy(g_state[client], sizeof(g_state[]), "unsticking");
