@@ -32,6 +32,10 @@ float  g_stuckSince[MAXPLAYERS + 1];
 int    g_smash[MAXPLAYERS + 1];          // entity reference of the obstacle being attacked
 float  g_smashUntil[MAXPLAYERS + 1];
 int    g_smashHealth[MAXPLAYERS + 1];    // obstacle health when we started hitting it
+int    g_shove[MAXPLAYERS + 1];          // furniture being shoved out of the way (entity reference)
+float  g_shoveUntil[MAXPLAYERS + 1];
+float  g_shoveFrom[MAXPLAYERS + 1][3];   // where it was when we started
+float  g_nextShove[MAXPLAYERS + 1];
 int    g_ignore[MAXPLAYERS + 1][4];      // obstacles that didn't break when hit (entity refs)
 float  g_ignoreUntil[MAXPLAYERS + 1][4];
 float  g_goal[MAXPLAYERS + 1][3];        // where we're heading to reach g_target
@@ -61,6 +65,7 @@ public void OnMapStart()
 	{
 		g_scripted[i] = false;
 		g_smash[i] = INVALID_ENT_REFERENCE;
+		g_shove[i] = INVALID_ENT_REFERENCE;
 		g_goalTime[i] = 0.0;
 		g_blockedSince[i] = 0.0;
 		for (int k = 0; k < 4; k++)
@@ -272,7 +277,7 @@ float CenterOf(int ent, float out[3])
 	return 0.0;
 }
 
-// Nearest smashable obstacle within reach of a stuck zombie.
+// Nearest smashable obstacle or piece of furniture within reach of a stuck zombie.
 int FindObstacle(int client)
 {
 	float me[3], c[3];
@@ -282,7 +287,7 @@ int FindObstacle(int client)
 	float bestDist = 110.0;
 	for (int ent = MaxClients + 1; ent < GetMaxEntities(); ent++)
 	{
-		if (!IsSmashable(ent) || IsIgnored(client, ent))
+		if (IsIgnored(client, ent) || !(IsSmashable(ent) || (IsValidEntity(ent) && IsFurniture(ent))))
 			continue;
 		CenterOf(ent, c);
 		float d = GetVectorDistance(me, c);
@@ -291,12 +296,108 @@ int FindObstacle(int client)
 	return best;
 }
 
+bool IsFurniture(int ent)
+{
+	char cls[64];
+	GetEntityClassname(ent, cls, sizeof(cls));
+	return StrContains(cls, "prop_physics") != -1;
+}
+
+// Start shoving a piece of furniture out of the way (right click with the zombie's arms).
+void StartShove(int client, int prop)
+{
+	if (EntRefToEntIndex(g_shove[client]) != INVALID_ENT_REFERENCE || IsIgnored(client, prop))
+		return;
+	g_shove[client] = EntIndexToEntRef(prop);
+	g_shoveUntil[client] = GetGameTime() + 3.0;
+	GetEntPropVector(prop, Prop_Data, "m_vecAbsOrigin", g_shoveFrom[client]);
+	Debug("%N shoves furniture %d", client, prop);
+}
+
+Action Timer_ShoveImpulse(Handle timer, DataPack pack)
+{
+	pack.Reset();
+	int prop = EntRefToEntIndex(pack.ReadCell());
+	if (prop == INVALID_ENT_REFERENCE)
+		return Plugin_Stop;
+	float vel[3];
+	vel[0] = pack.ReadFloat() * 260.0;
+	vel[1] = pack.ReadFloat() * 260.0;
+	vel[2] = 40.0;
+	TeleportEntity(prop, NULL_VECTOR, NULL_VECTOR, vel);
+	return Plugin_Stop;
+}
+
+// Furniture in the way: zombies shove it aside with a right click. The arms' punt alone barely
+// moves heavy furniture, so a shove that lands also gives the prop a push of its own.
+bool UpdateShove(int client, NavBot bot)
+{
+	int prop = EntRefToEntIndex(g_shove[client]);
+	if (prop == INVALID_ENT_REFERENCE)
+		return false;
+	float c[3], eye[3], pos[3];
+	CenterOf(prop, c);
+	GetClientEyePosition(client, eye);
+	GetEntPropVector(prop, Prop_Data, "m_vecAbsOrigin", pos);
+	if (GetGameTime() >= g_shoveUntil[client] || GetVectorDistance(eye, c) > 130.0)
+	{
+		g_shove[client] = INVALID_ENT_REFERENCE;
+		Debug("%N: shoved furniture %d %.0f units", client, prop, GetVectorDistance(pos, g_shoveFrom[client]));
+		if (GetVectorDistance(pos, g_shoveFrom[client]) < 10.0)
+		{
+			// Didn't budge: smash it if it breaks, else go around.
+			if (CanBreak(prop))
+			{
+				g_smash[client] = EntIndexToEntRef(prop);
+				g_smashUntil[client] = GetGameTime() + 4.0;
+				g_smashHealth[client] = EntHealth(prop);
+			}
+			else
+			{
+				Ignore(client, prop);
+				if (Unstick_RandomSpot(client, g_us_detour[client]))
+					g_us_detourUntil[client] = GetGameTime() + 3.0;
+			}
+			Debug("%N: furniture %d won't move", client, prop);
+		}
+		return false;
+	}
+	Address ctrl = bot.GetPlayerControllerInterface();
+	c[2] -= 4.0;
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Shoving furniture");
+	if (GetVectorDistance(eye, c) > 75.0)
+	{
+		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);   // step into reach
+		return true;
+	}
+	if (GetGameTime() >= g_nextShove[client] && NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+	{
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKSEC, 0.15);
+		g_nextShove[client] = GetGameTime() + 0.8;
+		float dir[3];
+		SubtractVectors(c, eye, dir);
+		dir[2] = 0.0;
+		NormalizeVector(dir, dir);
+		DataPack pack;
+		CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
+		pack.WriteCell(EntIndexToEntRef(prop));
+		pack.WriteFloat(dir[0]);
+		pack.WriteFloat(dir[1]);
+	}
+	return true;
+}
+
 // Don't let NavBot try to break unbreakable obstacles (e.g. metal closets) for zombies: detour.
 public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, const float goal[3])
 {
 	int client = bot.Index;
 	if (hitWorld || entity <= MaxClients || !IsValidEntity(entity) || !IsClientInGame(client) || GetClientTeam(client) != TEAM_ZOMBIES)
 		return Plugin_Continue;
+	if (IsFurniture(entity) && !IsIgnored(client, entity))
+	{
+		StartShove(client, entity);
+		return Plugin_Handled;      // shove it, don't smash it
+	}
 	if (CanBreak(entity) && !IsIgnored(client, entity))
 		return Plugin_Continue;     // NavBot breaks it
 	if (g_us_detourUntil[client] < GetGameTime() && Unstick_RandomSpot(client, g_us_detour[client]))
@@ -312,6 +413,9 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		g_scripted[client] = false;
 		return Plugin_Stop;
 	}
+
+	if (UpdateShove(client, bot))
+		return Plugin_Continue;
 
 	// Smashing an obstacle: stand still, aim at it and swing.
 	int obstacle = EntRefToEntIndex(g_smash[client]);
@@ -440,7 +544,9 @@ Action Timer_Think(Handle timer)
 		if (GetGameTime() - g_stuckSince[client] > 1.5 && EntRefToEntIndex(g_smash[client]) == INVALID_ENT_REFERENCE)
 		{
 			int obstacle = FindObstacle(client);
-			if (obstacle != -1)
+			if (obstacle != -1 && IsFurniture(obstacle))
+				StartShove(client, obstacle);
+			else if (obstacle != -1)
 			{
 				g_smash[client] = EntIndexToEntRef(obstacle);
 				g_smashUntil[client] = GetGameTime() + 4.0;
