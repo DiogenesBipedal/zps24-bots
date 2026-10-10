@@ -1475,12 +1475,28 @@ The file is a KeyValues text file per map in `data/zps24_learn/`, readable and e
   - *Always go in.* An entrance is used whenever the zombie is outside and its survivor inside,
     even if it can see them through the glass (rushing at them sent the pathfinder round to a
     door).
-- **Planked doorways.** Cabin's ammo room was a nav island: a window on one side and a doorway
-  with a plank across it (`func_physbox`) on the other. The generator treats the plank as a
-  wall. The door linker now also handles planks: if the floor under a plank is clear of world
-  geometry on both sides, the areas either side are connected. Planks count as furniture for
-  zombies, so they get shoved, or smashed if they won't move. On cabin this linked 6 planked
-  doorways, and the ammo room went from 2 reachable areas to the whole map.
+- **Sealed rooms: break through, don't link.** Cabin's ammo room was a nav island: a window on
+  one side, a doorway with a plank across it (`func_physbox`) on the other. The first attempt
+  linked the nav areas through planks, and it went wrong twice:
+  - **A board over a window looked like a doorway.** The trace down from it stopped on the
+    sill, so the floor seemed clear. Zombies pathed into the main house wall under the window.
+  - **Survivors used the links too.** They plan their defence by walking the nav mesh, so they
+    picked spots behind planks and barred doors, then stood stuck in front of barricades
+    they're not allowed to break.
+
+  So links are now only made through plain doors. Everything else found at map start
+  becomes an *opening to break*: planks, doors with a bar against them, glass windows, and
+  boarded windows within a climb of the floor. Each one stores its blocker, a walkable point on
+  each side, and whether it needs a climb. Then the whole mesh is labelled into *regions*
+  (connected areas, found with an undirected flood fill). A zombie whose survivor is in another
+  region picks the cheapest opening between the two regions (distance, plus a penalty per zombie
+  already using it) and goes through three phases:
+  1. walk up to its side;
+  2. break the blocker: swing at glass; swing and shove (with the push assist) at planks and
+     bars until they're 40 units off; for a barred door, `Unlock` and `Open`;
+  3. steer through to the far point, jumping if it's a climb.
+
+  An opening that holds for 12 s is marked tough for the round. On cabin: 18 openings, 8 regions.
 - **Survivors on ledges.** A survivor on a narrow ledge in the cabin's upstairs bedroom, 46
   units above the floor, made zombies grind into the wall. In the nav mesh that ledge only has
   connections leading off it, so a path can never end there. Goal areas must now be

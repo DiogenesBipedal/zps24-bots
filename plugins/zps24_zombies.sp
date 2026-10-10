@@ -56,6 +56,11 @@ bool   g_entryWindow[MAXPLAYERS + 1];    // a ground-floor window: smash it, the
 float  g_entrySmashUntil[MAXPLAYERS + 1];
 float  g_entryClearAt[MAXPLAYERS + 1];   // when the window was found broken
 float  g_doorsOnlyUntil[MAXPLAYERS + 1]; // a window took too long: break in through a door instead
+int    g_br[MAXPLAYERS + 1] = { -1, ... };   // opening this zombie is breaking through, or -1
+int    g_brFrom[MAXPLAYERS + 1];         // which side of it we're on (0/1)
+int    g_brPhase[MAXPLAYERS + 1];        // 0 walk up to it, 1 break it, 2 go through
+float  g_brUntil[MAXPLAYERS + 1];
+float  g_brCooldown[MAXPLAYERS + 1];
 int    g_unbarDoor[MAXPLAYERS + 1];      // door being unbarred from the inside (entity reference), or -1
 float  g_unbarUntil[MAXPLAYERS + 1];
 int    g_toughWin[32];                   // windows no zombie got through this round (shared by the horde)
@@ -68,6 +73,27 @@ float  g_goalTime[MAXPLAYERS + 1];
 float  g_blockedSince[MAXPLAYERS + 1];   // at the goal, but the target is behind a wall
 Address g_deadEnd[MAXPLAYERS + 1][4];    // goal areas that turned out to be dead ends
 float  g_deadEndUntil[MAXPLAYERS + 1][4];
+
+// Openings between rooms that the nav mesh doesn't cross: planks across doorways, doors with a
+// bar against them, windows and boarded windows. Survivors must not path through these (they
+// don't break barricades), so they are not linked; zombies break through them deliberately.
+#define BR_MAX       96
+#define BR_WINDOW    0      // glass: smash until broken
+#define BR_PLANK     1      // plank / board (func_physbox): knock it off
+#define BR_BARDOOR   2      // a door with a bar against it: knock the bar off, open the door
+int   g_brCount;
+int   g_brEnt[BR_MAX];                 // the opening's blocker (window, plank) or the door (entity references)
+int   g_brKind[BR_MAX];
+float g_brSide[BR_MAX][2][3];          // a walkable point on each side
+int   g_brComp[BR_MAX][2];             // nav region of each side
+bool  g_brClimb[BR_MAX];               // the opening's bottom is above the floor: jump through
+float g_brStart[BR_MAX][3];            // where the blocker was at map start
+bool  g_brTough[BR_MAX];               // nobody got through this round
+
+// Nav regions: areas connected to each other. Zombies use them to tell when a survivor is in a
+// part of the map they can't walk to (behind a plank, a barred door, a window).
+#define COMP_MAX_ID 8192
+int g_comp[COMP_MAX_ID];
 
 public void OnPluginStart()
 {
@@ -85,6 +111,7 @@ void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 {
 	g_fixedCount = 0;                   // props respawn every round
 	g_toughWinCount = 0;
+	g_doorsLinked = false;              // props respawn: find the openings and their blockers again
 	Stairs_Relearn();
 	ResetPlacements();
 }
@@ -100,6 +127,8 @@ public void OnMapStart()
 		g_entrySmashUntil[i] = 0.0;
 		g_doorsOnlyUntil[i] = 0.0;
 		g_unbarDoor[i] = INVALID_ENT_REFERENCE;
+		g_br[i] = -1;
+		g_brCooldown[i] = 0.0;
 		g_fixedCount = 0;
 		g_toughWinCount = 0;
 		g_entryInUntil[i] = 0.0;
@@ -392,6 +421,172 @@ bool ChooseEntry(int client, const float target[3])
 #define ENTRY_NONE  0
 #define ENTRY_PATH  1      // moveGoal set: path there
 #define ENTRY_STEER 2      // steering the bot ourselves (no pathing)
+
+// ---------------------------------------------------------------------------------------------
+// Breaking through to a survivor in a part of the map we can't walk to (behind a plank, a
+// barred door or a window). The openings are found at map start (LinkDoors).
+
+int BreachLoad(int client, int k)
+{
+	int n = 0;
+	for (int i = 1; i <= MaxClients; i++)
+		if (i != client && g_br[i] == k && IsClientInGame(i) && IsPlayerAlive(i))
+			n++;
+	return n;
+}
+
+bool BlockerGone(int k)
+{
+	int ent = EntRefToEntIndex(g_brEnt[k]);
+	switch (g_brKind[k])
+	{
+		case BR_WINDOW: return !WindowIntact(ent);
+		case BR_PLANK:
+		{
+			if (ent == INVALID_ENT_REFERENCE)
+				return true;
+			float c[3];
+			CenterOf(ent, c);
+			return GetVectorDistance(c, g_brStart[k]) > 40.0;      // knocked off the opening
+		}
+		case BR_BARDOOR: return ent == INVALID_ENT_REFERENCE || DoorBar(ent) == -1;
+	}
+	return true;
+}
+
+int UpdateBreach(int client, NavBot bot, const float me[3], int target, float moveGoal[3])
+{
+	int k = g_br[client];
+	if (k == -1)
+	{
+		if (GetGameTime() < g_brCooldown[client] || g_brCount == 0)
+			return ENTRY_NONE;
+		int myComp = AreaComp(NavBotNavMesh.GetNearestNavArea(me, 120.0, false, true));
+		NavBotBasePlayer tp = NavBotManager.GetBasePlayer(target);
+		Address ta = tp.IsNull ? Address_Null : tp.GetLastKnownNavArea();
+		int tComp = AreaComp(ta);
+		if (myComp == -1 || tComp == -1 || myComp == tComp)
+			return ENTRY_NONE;
+		// The cheapest opening between our region and theirs.
+		float tpos[3];
+		GetClientAbsOrigin(target, tpos);
+		float best = 999999.0;
+		for (int i = 0; i < g_brCount; i++)
+		{
+			if (g_brTough[i])
+				continue;
+			for (int side = 0; side < 2; side++)
+			{
+				if (g_brComp[i][side] != myComp || g_brComp[i][1 - side] != tComp)
+					continue;
+				float cost = GetVectorDistance(me, g_brSide[i][side]) + GetVectorDistance(g_brSide[i][1 - side], tpos)
+					+ 300.0 * float(BreachLoad(client, i)) + (g_brKind[i] == BR_WINDOW ? -100.0 : 0.0);
+				if (cost < best) { best = cost; g_br[client] = i; g_brFrom[client] = side; }
+			}
+		}
+		k = g_br[client];
+		if (k == -1)
+		{
+			g_brCooldown[client] = GetGameTime() + 5.0;
+			return ENTRY_NONE;
+		}
+		g_brPhase[client] = 0;
+		g_brUntil[client] = GetGameTime() + 40.0;
+		Debug("%N breaks through a %s at %.0f %.0f %.0f to reach %N", client,
+			g_brKind[k] == BR_WINDOW ? "window" : (g_brKind[k] == BR_PLANK ? "plank" : "barred door"),
+			g_brStart[k][0], g_brStart[k][1], g_brStart[k][2], target);
+	}
+	if (GetGameTime() > g_brUntil[client])
+	{
+		if (g_brPhase[client] == 1)
+		{
+			g_brTough[k] = true;                // couldn't break it: the horde stops trying this one
+			Debug("%N: couldn't break through, giving up on that opening", client);
+		}
+		g_br[client] = -1;
+		g_brCooldown[client] = GetGameTime() + 3.0;
+		return ENTRY_NONE;
+	}
+	int from = g_brFrom[client], to = 1 - from;
+	Address ctrl = bot.GetPlayerControllerInterface();
+	int ent = EntRefToEntIndex(g_brEnt[k]);
+
+	if (g_brPhase[client] == 0)
+	{
+		if (GetVectorDistance(me, g_brSide[k][from]) > 40.0)
+		{
+			moveGoal = g_brSide[k][from];
+			return ENTRY_PATH;
+		}
+		g_brPhase[client] = BlockerGone(k) ? 2 : 1;
+		g_brUntil[client] = GetGameTime() + (g_brPhase[client] == 1 ? 12.0 : 5.0);
+	}
+	if (g_brPhase[client] == 1)
+	{
+		if (BlockerGone(k))
+		{
+			if (g_brKind[k] == BR_BARDOOR && ent != INVALID_ENT_REFERENCE)
+			{
+				AcceptEntityInput(ent, "Unlock", client, client);
+				AcceptEntityInput(ent, "Open", client, client);
+			}
+			Debug("%N broke through", client);
+			g_brPhase[client] = 2;
+			g_brUntil[client] = GetGameTime() + 5.0;
+			return ENTRY_STEER;
+		}
+		int blocker = g_brKind[k] == BR_BARDOOR ? (ent != INVALID_ENT_REFERENCE ? DoorBar(ent) : -1) : ent;
+		float c[3];
+		if (blocker != -1 && IsValidEntity(blocker))
+			CenterOf(blocker, c);
+		else
+			c = g_brStart[k];
+		NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Breaking through");
+		float eye[3];
+		GetClientEyePosition(client, eye);
+		if (GetVectorDistance(eye, c) > 75.0)
+			NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
+		if (GetGameTime() >= g_nextShove[client] && NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+		{
+			// Windows: swing. Planks and bars: swing and shove in turn, with the push assist,
+			// away from us (into the room / off the door).
+			bool shove = g_brKind[k] != BR_WINDOW && RoundToFloor(GetGameTime()) % 2 == 0;
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, shove ? NAVBOT_BUTTON_ATTACKSEC : NAVBOT_BUTTON_ATTACKPRIM, 0.2);
+			g_nextShove[client] = GetGameTime() + 0.7;
+			if (shove && blocker != -1)
+			{
+				float dir[3];
+				SubtractVectors(g_brSide[k][to], g_brSide[k][from], dir);
+				dir[2] = 0.0;
+				NormalizeVector(dir, dir);
+				DataPack pack;
+				CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
+				pack.WriteCell(EntIndexToEntRef(blocker));
+				pack.WriteFloat(dir[0]);
+				pack.WriteFloat(dir[1]);
+			}
+		}
+		return ENTRY_STEER;
+	}
+	// Phase 2: through the opening, climbing if it's a window or a boarded window.
+	if (GetVectorDistance(me, g_brSide[k][to]) < 40.0)
+	{
+		g_br[client] = -1;
+		g_brCooldown[client] = GetGameTime() + 2.0;
+		return ENTRY_NONE;
+	}
+	float look[3];
+	look = g_brSide[k][to];
+	look[2] += 40.0;
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, look, LOOK_MOVEMENT, 0.3, "Going through");
+	NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), g_brSide[k][to], 100);
+	if (g_brClimb[k] && (GetEntityFlags(client) & FL_ONGROUND))
+	{
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_JUMP, 0.1);
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_CROUCH, 0.6);
+	}
+	return ENTRY_STEER;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Unbarring a door from the inside: in through a window, then knock away the plank (or padlock,
@@ -1050,7 +1245,7 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 
 	// Staircases the nav mesh doesn't cover (church tower): walk the hand-made route.
 	Action stairs;
-	if (Stairs_Update(client, bot, me, target, moveGoal, routeType, stairs))
+	if (Stairs_Update(client, bot, me, target, moveGoal, routeType, stairs, Unstick_StuckFor(client) > 2.5))
 	{
 		g_blockedSince[client] = 0.0;
 		if (stairs == Plugin_Continue)
@@ -1062,6 +1257,8 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 
 	// Target holed up in a building: attack through an entrance of our own.
 	int entry = UpdateUnbar(client, bot, me, moveGoal);
+	if (entry == ENTRY_NONE)
+		entry = UpdateBreach(client, bot, me, g_target[client], moveGoal);   // survivor in a sealed-off part
 	if (entry == ENTRY_NONE)
 		entry = UpdateEntry(client, bot, me, target, moveGoal);
 	if (entry == ENTRY_STEER)
@@ -1139,39 +1336,104 @@ bool TraceWorldOnly(int entity, int mask)
 	return entity == 0;
 }
 
-Address AreaOnSide(const float center[3], const float n[3], float floorZ, float sign)
+// Rooms whose door was closed while the nav mesh was generated come out as islands: their
+// areas aren't connected to the rest, so a zombie hunting someone inside can't find a path and
+// walks straight at the wall in between. Connect the areas on both sides of every door.
+int AreaComp(Address a)
+{
+	if (a == Address_Null)
+		return -1;
+	int id = NavBotNavArea.GetID(a);
+	return id >= 0 && id < COMP_MAX_ID ? g_comp[id] : -1;
+}
+
+void LabelRegions()
+{
+	for (int i = 0; i < COMP_MAX_ID; i++)
+		g_comp[i] = -1;
+	float lo[3] = { -32768.0, -32768.0, -32768.0 }, hi[3] = { 32768.0, 32768.0, 32768.0 };
+	NavBotNavAreaVector all = NavBotNavMesh.CollectAreasOverlappingExtent(lo, hi);
+	ArrayList queue = new ArrayList();
+	int comps = 0;
+	for (int i = 0; i < all.Size; i++)
+	{
+		Address start = all.At(i);
+		int sid = NavBotNavArea.GetID(start);
+		if (sid < 0 || sid >= COMP_MAX_ID || g_comp[sid] != -1)
+			continue;
+		g_comp[sid] = comps;
+		queue.Clear();
+		queue.Push(start);
+		while (queue.Length > 0)
+		{
+			Address a = queue.Get(queue.Length - 1);
+			queue.Erase(queue.Length - 1);
+			// Undirected: a region is everything joined by a connection either way (drops count).
+			for (int d = 0; d < 4; d++)
+			{
+				int n = NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
+				for (int k = 0; k < n; k++)
+				{
+					Address b = NavBotNavArea.GetAdjacentArea(a, view_as<NavBotNavDirType>(d), k);
+					int bid = b != Address_Null ? NavBotNavArea.GetID(b) : -1;
+					if (bid < 0 || bid >= COMP_MAX_ID || g_comp[bid] != -1)
+						continue;
+					g_comp[bid] = comps;
+					queue.Push(b);
+				}
+			}
+			int off = NavBotNavArea.GetOffMeshConnectionCount(a);
+			for (int k = 0; k < off; k++)
+			{
+				Address b = NavBotNavOffMeshConnection.GetConnectedArea(NavBotNavArea.GetOffMeshConnection(a, k));
+				int bid = b != Address_Null ? NavBotNavArea.GetID(b) : -1;
+				if (bid < 0 || bid >= COMP_MAX_ID || g_comp[bid] != -1)
+					continue;
+				g_comp[bid] = comps;
+				queue.Push(b);
+			}
+		}
+		comps++;
+	}
+	delete queue;
+	delete all;
+	LogMessage("Nav regions: %d", comps);
+}
+
+// The walkable floor on one side of an opening: step out along the normal, trace down to the
+// floor, take the nav area there. Returns the area and a point on it.
+Address SideArea(const float center[3], const float n[3], float sign, float point[3])
 {
 	for (float dist = 32.0; dist <= 128.0; dist += 16.0)
 	{
-		float p[3], q[3];
+		float p[3], down[3];
 		p[0] = center[0] + n[0] * dist * sign;
 		p[1] = center[1] + n[1] * dist * sign;
-		p[2] = floorZ;
-		Address area = NavBotNavMesh.GetNearestNavArea(p, 40.0, false, true);
+		p[2] = center[2];
+		down = p;
+		down[2] -= 300.0;
+		TR_TraceRayFilter(p, down, MASK_PLAYERSOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
+		if (TR_StartSolid() || !TR_DidHit())
+			continue;
+		float floorPos[3];
+		TR_GetEndPosition(floorPos);
+		floorPos[2] += 16.0;
+		Address area = NavBotNavMesh.GetNearestNavArea(floorPos, 40.0, false, true);
 		if (area == Address_Null)
 			continue;
-		NavBotNavArea.GetClosestPointOnArea(area, p, q);
-		// Must really be on this side of the door, and not past a wall.
-		float rel = (q[0] - center[0]) * n[0] * sign + (q[1] - center[1]) * n[1] * sign;
-		if (rel <= 0.0)
-			continue;
-		q[2] += 16.0;
-		float from[3];
-		from = center;
-		from[2] = floorZ;
-		TR_TraceRayFilter(from, q, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
-		if (!TR_DidHit())
+		NavBotNavArea.GetClosestPointOnArea(area, floorPos, point);
+		float rel = (point[0] - center[0]) * n[0] * sign + (point[1] - center[1]) * n[1] * sign;
+		if (rel > 8.0)
 			return area;
 	}
 	return Address_Null;
 }
 
-// Rooms whose door was closed while the nav mesh was generated come out as islands: their
-// areas aren't connected to the rest, so a zombie hunting someone inside can't find a path and
-// walks straight at the wall in between. Connect the areas on both sides of every door.
+// Scan every door, plank and window: link plain doors, record the rest as openings to break.
 int LinkDoors(bool verbose)
 {
-	static const char classes[][] = { "func_door_rotating", "prop_door_rotating", "func_door" };
+	g_brCount = 0;
+	static const char classes[][] = { "func_door_rotating", "prop_door_rotating", "func_door", "func_physbox", "func_physbox_multiplayer", "func_breakable_surf", "func_breakable" };
 	int linked = 0;
 	for (int c = 0; c < sizeof(classes); c++)
 	{
@@ -1180,114 +1442,85 @@ int LinkDoors(bool verbose)
 		{
 			if (!HasEntProp(ent, Prop_Send, "m_vecMins"))
 				continue;
-			float center[3], mins[3], maxs[3];
+			bool isDoor = c <= 2, isPlank = c == 3 || c == 4;
+			float center[3], mins[3], maxs[3], origin[3];
 			CenterOf(ent, center);
+			GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", origin);
 			GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
 			GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
 			float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1], sz = maxs[2] - mins[2];
 			float thin = sx < sy ? sx : sy, wide = sx < sy ? sy : sx;
-			if (thin > 16.0 || wide < 24.0 || sz < 70.0 || sz > 160.0)
-				continue;                    // not a closed, door-shaped door
-			float n[3], a[3], b[3];
-			n[0] = sx < sy ? 1.0 : 0.0;
-			n[1] = sx < sy ? 0.0 : 1.0;
-			float floorZ = center[2] - sz * 0.5 + 16.0;
-			for (int i = 0; i < 2; i++) { a[i] = center[i] + n[i] * 40.0; b[i] = center[i] - n[i] * 40.0; }
-			a[2] = floorZ; b[2] = floorZ;
-			// Only through the doorway: no wall (world) between the two sides.
-			TR_TraceRayFilter(a, b, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
-			if (TR_DidHit())
+			if (thin > 16.0 || wide < 24.0 || wide > 140.0)
+				continue;                    // not an opening-shaped thing
+			if (isDoor && (sz < 70.0 || sz > 160.0))
 				continue;
-			// The nearest area on each side, looking up to 128 units out (a small room's area can
-			// start well back from the door).
-			Address areaA = AreaOnSide(center, n, floorZ, 1.0);
-			Address areaB = AreaOnSide(center, n, floorZ, -1.0);
-			if (areaA == Address_Null || areaB == Address_Null || areaA == areaB)
+			if (!isDoor && !isPlank && (sz < 20.0 || sz > 140.0))
 				continue;
-			float ca[3], cb[3];
-			NavBotNavArea.GetClosestPointOnArea(areaA, a, ca);
-			NavBotNavArea.GetClosestPointOnArea(areaB, b, cb);
-			if (FloatAbs(ca[2] - cb[2]) > 18.0)
-				continue;
-			bool ab = NavBotNavArea.IsConnectedToAny(areaA, areaB), ba = NavBotNavArea.IsConnectedToAny(areaB, areaA);
-			if (ab && ba)
-				continue;
-			bool made = false;
-			if (!ab) made = NavBotNavArea.ConnectToAdjacent(areaA, areaB) || made;
-			if (!ba) made = NavBotNavArea.ConnectToAdjacent(areaB, areaA) || made;
-			if (made)
-				linked++;
-			if (verbose)
-				PrintToServer("[doorlinks] door %d (%s) at %.0f %.0f %.0f: areas #%d <-> #%d %s", ent, classes[c], center[0], center[1], center[2],
-					NavBotNavArea.GetID(areaA), NavBotNavArea.GetID(areaB), made ? "linked" : "could not link");
-		}
-	}
-	// Doorways with a plank across them (func_physbox): the generator saw a wall. Link them too;
-	// zombies knock the plank off when they get there (it counts as furniture).
-	static const char planks[][] = { "func_physbox", "func_physbox_multiplayer" };
-	for (int c = 0; c < sizeof(planks); c++)
-	{
-		int ent = -1;
-		while ((ent = FindEntityByClassname(ent, planks[c])) != -1)
-		{
-			if (!HasEntProp(ent, Prop_Send, "m_vecMins"))
-				continue;
-			float center[3], mins[3], maxs[3];
-			CenterOf(ent, center);
-			GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
-			GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
-			float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1];
 			float n[3];
 			n[0] = sx < sy ? 1.0 : 0.0;
 			n[1] = sx < sy ? 0.0 : 1.0;
-			// The floor under the plank.
-			float down[3];
-			down = center;
-			down[2] -= 200.0;
-			TR_TraceRayFilter(center, down, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
-			if (!TR_DidHit())
+			float pa[3], pb[3];
+			Address areaA = SideArea(center, n, 1.0, pa);
+			Address areaB = SideArea(center, n, -1.0, pb);
+			if (areaA == Address_Null || areaB == Address_Null || areaA == areaB || FloatAbs(pa[2] - pb[2]) > 24.0)
 				continue;
-			float floorPos[3];
-			TR_GetEndPosition(floorPos);
-			float floorZ = floorPos[2] + 16.0;
-			float a[3], b[3];
-			for (int i = 0; i < 2; i++) { a[i] = center[i] + n[i] * 40.0; b[i] = center[i] - n[i] * 40.0; }
-			a[2] = floorZ; b[2] = floorZ;
-			TR_TraceRayFilter(a, b, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
-			if (TR_DidHit())
-				continue;                    // a plank against a wall, not across an opening
-			Address areaA = AreaOnSide(center, n, floorZ, 1.0);
-			Address areaB = AreaOnSide(center, n, floorZ, -1.0);
-			if (areaA == Address_Null || areaB == Address_Null || areaA == areaB)
-				continue;
-			float ca[3], cb[3];
-			NavBotNavArea.GetClosestPointOnArea(areaA, a, ca);
-			NavBotNavArea.GetClosestPointOnArea(areaB, b, cb);
-			if (FloatAbs(ca[2] - cb[2]) > 18.0)
-				continue;
-			// A doorway's plank sits over the floor people walk on. Under a boarded-up window the
-			// trace down stops on the sill, well above the floors either side: not a way through.
-			if (floorPos[2] > (ca[2] > cb[2] ? ca[2] : cb[2]) + 12.0)
-				continue;
-			// And there must be headroom to walk through: clear at chest height too.
-			float a2[3], b2[3];
-			a2 = a; b2 = b;
-			a2[2] = floorPos[2] + 56.0; b2[2] = floorPos[2] + 56.0;
-			TR_TraceRayFilter(a2, b2, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
+			// Only through the opening: nothing of the world in the way at its middle height.
+			float ma[3], mb[3];
+			ma = pa; mb = pb;
+			float midZ = isDoor ? (pa[2] + 40.0) : center[2];
+			ma[2] = midZ; mb[2] = midZ;
+			TR_TraceRayFilter(ma, mb, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
 			if (TR_DidHit())
 				continue;
-			bool ab = NavBotNavArea.IsConnectedToAny(areaA, areaB), ba = NavBotNavArea.IsConnectedToAny(areaB, areaA);
-			if (ab && ba)
+			float bottom = origin[2] + mins[2];
+			float floorZ = pa[2] > pb[2] ? pa[2] : pb[2];
+			if (!isDoor && bottom - floorZ > 56.0)
+				continue;                    // too high to climb through
+
+			int bar = isDoor ? DoorBar(ent) : -1;
+			if (isDoor && bar == -1)
+			{
+				// A plain door: everyone can walk through. Link it.
+				bool ab = NavBotNavArea.IsConnectedToAny(areaA, areaB), ba = NavBotNavArea.IsConnectedToAny(areaB, areaA);
+				if (ab && ba)
+					continue;
+				bool made = false;
+				if (!ab) made = NavBotNavArea.ConnectToAdjacent(areaA, areaB) || made;
+				if (!ba) made = NavBotNavArea.ConnectToAdjacent(areaB, areaA) || made;
+				if (made)
+					linked++;
+				if (verbose)
+					PrintToServer("[doorlinks] door %d at %.0f %.0f %.0f: areas #%d <-> #%d %s", ent, center[0], center[1], center[2],
+						NavBotNavArea.GetID(areaA), NavBotNavArea.GetID(areaB), made ? "linked" : "could not link");
 				continue;
-			bool made = false;
-			if (!ab) made = NavBotNavArea.ConnectToAdjacent(areaA, areaB) || made;
-			if (!ba) made = NavBotNavArea.ConnectToAdjacent(areaB, areaA) || made;
-			if (made)
-				linked++;
+			}
+			if (!isDoor && !isPlank)
+			{
+				// Windows: glass (func_breakable_surf, glass func_breakable) only.
+				if (c == 6 && GetEntProp(ent, Prop_Data, "m_Material") != 0)
+					continue;
+			}
+			if (g_brCount >= BR_MAX)
+				continue;
+			int k = g_brCount++;
+			g_brEnt[k] = EntIndexToEntRef(ent);
+			g_brKind[k] = isDoor ? BR_BARDOOR : (isPlank ? BR_PLANK : BR_WINDOW);
+			g_brSide[k][0] = pa;
+			g_brSide[k][1] = pb;
+			g_brClimb[k] = !isDoor && bottom - floorZ > 14.0;
+			g_brStart[k] = center;
+			g_brTough[k] = false;
 			if (verbose)
-				PrintToServer("[doorlinks] planked doorway %d at %.0f %.0f %.0f: areas #%d <-> #%d %s", ent, center[0], center[1], center[2],
-					NavBotNavArea.GetID(areaA), NavBotNavArea.GetID(areaB), made ? "linked" : "could not link");
+				PrintToServer("[doorlinks] %s %d at %.0f %.0f %.0f: areas #%d | #%d, to break through%s",
+					isDoor ? "barred door" : (isPlank ? "plank" : "window"), ent, center[0], center[1], center[2],
+					NavBotNavArea.GetID(areaA), NavBotNavArea.GetID(areaB), g_brClimb[k] ? " (climb)" : "");
 		}
+	}
+	LabelRegions();
+	for (int k = 0; k < g_brCount; k++)
+	{
+		g_brComp[k][0] = AreaComp(NavBotNavMesh.GetNearestNavArea(g_brSide[k][0], 40.0, false, true));
+		g_brComp[k][1] = AreaComp(NavBotNavMesh.GetNearestNavArea(g_brSide[k][1], 40.0, false, true));
 	}
 	return linked;
 }

@@ -1921,7 +1921,7 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		spot = g_defendPos[h][g_defendIdx[client] % g_defendCount[h]];
 	}
 	Action climb;
-	if (Stairs_Update(client, bot, me, spot, moveGoal, routeType, climb))
+	if (Stairs_Update(client, bot, me, spot, moveGoal, routeType, climb, Unstick_StuckFor(client) > 2.5))
 	{
 		strcopy(g_state[client], sizeof(g_state[]), "taking the stairs");
 		if (climb == Plugin_Continue) g_us_wantMove[client] = false;

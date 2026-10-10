@@ -37,6 +37,8 @@ int   g_st_step[MAXPLAYERS + 1];              // +1 going up, -1 going down
 float g_st_progressAt[MAXPLAYERS + 1];
 float g_st_bestDist[MAXPLAYERS + 1];
 float g_st_cooldown[MAXPLAYERS + 1];
+int   g_st_banned[MAXPLAYERS + 1] = { -1, ... };   // a learned route that failed this bot
+float g_st_bannedUntil[MAXPLAYERS + 1];
 
 void Stairs_AddPoint(int r, float x, float y, float z)
 {
@@ -179,7 +181,9 @@ int Stairs_RouteFor(int from, int to, int &step)
 
 // Steers the bot while it should use a staircase. Returns true when it has set moveGoal or is
 // steering the bot itself; `result` is then what the scripted-update callback should return.
-bool Stairs_Update(int client, NavBot bot, const float me[3], const float target[3], float moveGoal[3], NavBotRouteType &routeType, Action &result)
+// allowLearned: also consider routes learned from the main player. Pass true only when the bot
+// is stuck on its normal path; where the nav mesh covers the way (most stairs), pathing is better.
+bool Stairs_Update(int client, NavBot bot, const float me[3], const float target[3], float moveGoal[3], NavBotRouteType &routeType, Action &result, bool allowLearned = false)
 {
 	if (g_st_routeCount == 0)
 		return false;
@@ -198,6 +202,11 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 		}
 		else if (GetGameTime() - g_st_progressAt[client] > 3.0)
 		{
+			if (r >= g_st_handMade)
+			{
+				g_st_banned[client] = r;             // a learned route that doesn't work from here: not again for a while
+				g_st_bannedUntil[client] = GetGameTime() + 30.0;
+			}
 			g_st_route[client] = -1;                 // stuck (someone in the way?): try again shortly
 			g_st_cooldown[client] = GetGameTime() + 3.0;
 			return false;
@@ -248,8 +257,12 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 		if (from != to)
 			r = Stairs_RouteFor(from, to, step);
 	}
-	if (r == -1)
+	if (r == -1 && allowLearned)
+	{
 		r = Stairs_LearnedFor(me, target, step);
+		if (r != -1 && r == g_st_banned[client] && GetGameTime() < g_st_bannedUntil[client])
+			r = -1;
+	}
 	if (r == -1)
 		return false;
 
