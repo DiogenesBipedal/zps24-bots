@@ -40,6 +40,7 @@ int    g_place[MAXPLAYERS + 1] = { -1, ... };   // learned zombie furniture plac
 float  g_placeStarted[MAXPLAYERS + 1];
 int    g_placeBy[LEARN_MAX_PLACES];      // zombie setting it up this round (0 = nobody)
 bool   g_placeDone[LEARN_MAX_PLACES];
+bool   g_doorsLinked;                    // nav areas on both sides of every door connected (once per map)
 int    g_fixed[32];                      // furniture no zombie could move (shared by the horde)
 int    g_fixedCount;
 // Breaking into a building through a chosen entrance (door, window, or one learned from the
@@ -64,6 +65,7 @@ public void OnPluginStart()
 	g_enable = CreateConVar("sm_zps24zombies_enable", "1", "Enable the ZPS 2.4 zombie AI");
 	g_debug  = CreateConVar("sm_zps24zombies_debug", "0", "Log zombie AI decisions");
 	g_forceTarget = CreateConVar("sm_zps24zombies_force_target", "0", "Debug: every zombie hunts this client index (0 = normal)");
+	RegServerCmd("sm_zps24_doorlinks", Cmd_DoorLinks, "Connect the nav areas on both sides of every door again and report");
 	AutoExecConfig(true, "zps24_zombies");
 	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
 }
@@ -94,6 +96,7 @@ public void OnMapStart()
 	}
 	Stairs_OnMapStart();
 	ResetPlacements();
+	g_doorsLinked = false;
 	CreateTimer(0.5, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
@@ -835,10 +838,90 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	return Plugin_Changed;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Doors in the nav mesh
+
+bool TraceWorldOnly(int entity, int mask)
+{
+	return entity == 0;
+}
+
+// Rooms whose door was closed while the nav mesh was generated come out as islands: their
+// areas aren't connected to the rest, so a zombie hunting someone inside can't find a path and
+// walks straight at the wall in between. Connect the areas on both sides of every door.
+int LinkDoors(bool verbose)
+{
+	static const char classes[][] = { "func_door_rotating", "prop_door_rotating", "func_door" };
+	int linked = 0;
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int ent = -1;
+		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
+		{
+			if (!HasEntProp(ent, Prop_Send, "m_vecMins"))
+				continue;
+			float center[3], mins[3], maxs[3];
+			CenterOf(ent, center);
+			GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+			GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+			float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1], sz = maxs[2] - mins[2];
+			float thin = sx < sy ? sx : sy, wide = sx < sy ? sy : sx;
+			if (thin > 16.0 || wide < 24.0 || sz < 70.0 || sz > 160.0)
+				continue;                    // not a closed, door-shaped door
+			float n[3], a[3], b[3];
+			n[0] = sx < sy ? 1.0 : 0.0;
+			n[1] = sx < sy ? 0.0 : 1.0;
+			float floorZ = center[2] - sz * 0.5 + 16.0;
+			for (int i = 0; i < 2; i++) { a[i] = center[i] + n[i] * 40.0; b[i] = center[i] - n[i] * 40.0; }
+			a[2] = floorZ; b[2] = floorZ;
+			// Only through the doorway: no wall (world) between the two sides.
+			TR_TraceRayFilter(a, b, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
+			if (TR_DidHit())
+				continue;
+			Address areaA = NavBotNavMesh.GetNearestNavArea(a, 64.0, false, true);
+			Address areaB = NavBotNavMesh.GetNearestNavArea(b, 64.0, false, true);
+			if (areaA == Address_Null || areaB == Address_Null || areaA == areaB)
+				continue;
+			float ca[3], cb[3];
+			NavBotNavArea.GetClosestPointOnArea(areaA, a, ca);
+			NavBotNavArea.GetClosestPointOnArea(areaB, b, cb);
+			if (FloatAbs(ca[2] - cb[2]) > 18.0)
+				continue;
+			bool ab = NavBotNavArea.IsConnectedToAny(areaA, areaB), ba = NavBotNavArea.IsConnectedToAny(areaB, areaA);
+			if (ab && ba)
+				continue;
+			bool made = false;
+			if (!ab) made = NavBotNavArea.ConnectToAdjacent(areaA, areaB) || made;
+			if (!ba) made = NavBotNavArea.ConnectToAdjacent(areaB, areaA) || made;
+			if (made)
+				linked++;
+			if (verbose)
+				PrintToServer("[doorlinks] door %d (%s) at %.0f %.0f %.0f: areas #%d <-> #%d %s", ent, classes[c], center[0], center[1], center[2],
+					NavBotNavArea.GetID(areaA), NavBotNavArea.GetID(areaB), made ? "linked" : "could not link");
+		}
+	}
+	return linked;
+}
+
+Action Cmd_DoorLinks(int args)
+{
+	if (!NavBotNavMesh.IsLoaded()) { PrintToServer("[doorlinks] no nav mesh"); return Plugin_Handled; }
+	PrintToServer("[doorlinks] %d doors linked", LinkDoors(true));
+	g_doorsLinked = true;
+	return Plugin_Handled;
+}
+
 Action Timer_Think(Handle timer)
 {
 	if (!g_enable.BoolValue || !LibraryExists("navbot") || !NavBotNavMesh.IsLoaded())
 		return Plugin_Continue;
+	if (!g_doorsLinked)
+	{
+		g_doorsLinked = true;
+		int n = LinkDoors(false);
+		if (n > 0)
+			LogMessage("Linked the nav mesh through %d doors", n);
+	}
 
 	AssignPlacements();
 	for (int client = 1; client <= MaxClients; client++)
