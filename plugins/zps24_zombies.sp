@@ -11,6 +11,7 @@
 #include <navbot>
 #include "include/zps24_unstick.inc"
 #include "include/zps24_stairs.inc"
+#include "include/zps24_doors.inc"
 
 public Plugin myinfo =
 {
@@ -1279,6 +1280,10 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 	int client = bot.Index;
 	if (hitWorld || entity <= MaxClients || !IsValidEntity(entity) || !IsClientInGame(client) || GetClientTeam(client) != TEAM_ZOMBIES)
 		return Plugin_Continue;
+	// A hinged door isn't physics: shoving does nothing. Open it with E; if it stays shut
+	// (locked, barred) Doors_Use gives up and we break it as before.
+	if (Doors_IsHinged(entity) && Doors_IsClosed(entity) && !Doors_IsLocked(entity) && Doors_Use(client, bot, entity))
+		return Plugin_Handled;
 	if (IsFurniture(entity) && !IsIgnored(client, entity))
 	{
 		StartShove(client, entity);
@@ -1302,6 +1307,13 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 
 	if (UpdateShove(client, bot))
 		return Plugin_Continue;
+
+	// A closed hinged door right in front of us: E, like a player (bumping it does nothing).
+	if (Doors_UseAhead(client, bot))
+	{
+		g_us_wantMove[client] = false;
+		return Plugin_Continue;
+	}
 
 	// Smashing an obstacle: stand still, aim at it and swing.
 	int obstacle = EntRefToEntIndex(g_smash[client]);

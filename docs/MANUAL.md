@@ -1681,6 +1681,25 @@ aims at its middle and left-clicks until the door breaks (state "breaking the ba
 20 s at most). Then it carries on down. Every time a bot goes there, it does the same. Doors at
 ground level and above are still never touched.
 
+### 11.13 Doors that don't move when you bump them: press E
+
+ZPS has two kinds of doors. Physics doors (`prop_physics` shaped like a door) swing when pushed,
+so walking or shoving through works. Hinged doors (`prop_door_rotating`, `func_door_rotating`,
+`func_door`) are not physics objects: bumping them does nothing, and a player opens them with E.
+Bots used to walk into these and stand there (survivors), or smash them (zombies).
+
+`plugins/include/zps24_doors.inc` now handles hinged doors for both teams:
+
+- **Every think:** if a closed, unlocked hinged door is within 80 units in front of the bot
+  (where it faces or where it's moving), the bot aims at it and presses E (state "opening a door
+  (E)"). It only presses on closed doors, so it never shuts an open one.
+- **On the nav path:** when NavBot reports a hinged door as the obstacle, the bot presses E
+  instead of bumping, shoving or breaking it.
+- **If it stays shut:** two presses, then that door is left alone for 10 s. It is locked,
+  barred by a plank or furniture, or this team can't use it. Zombies then fall back to the
+  breach logic (break the bar, smash the door); survivors walk around, because they never break
+  doors (except basement doors, 11.12).
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

@@ -25,6 +25,7 @@
 #define REQUIRE_EXTENSIONS
 #include "include/zps24_unstick.inc"
 #include "include/zps24_stairs.inc"
+#include "include/zps24_doors.inc"
 
 public Plugin myinfo =
 {
@@ -901,6 +902,12 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 
 	char cls[64];
 	GetEntityClassname(entity, cls, sizeof(cls));
+
+	if (Doors_IsHinged(entity) && Doors_IsClosed(entity) && !Doors_IsLocked(entity))
+	{
+		Doors_Use(client, bot, entity);   // not physics: E, never bump or break it
+		return Plugin_Handled;
+	}
 
 	if (StrContains(cls, "door") != -1)
 	{
@@ -2224,6 +2231,14 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		routeType = NAVBOT_FASTEST_ROUTE;
 		strcopy(g_state[client], sizeof(g_state[]), "falling back");
 		return MoveTo(client, moveGoal);
+	}
+
+	// A closed hinged door in front of us: bumping it does nothing, open it with E.
+	if (Doors_UseAhead(client, bot))
+	{
+		strcopy(g_state[client], sizeof(g_state[]), "opening a door (E)");
+		g_us_wantMove[client] = false;
+		return Plugin_Continue;
 	}
 
 	// A basement door in the way: break it (melee).
