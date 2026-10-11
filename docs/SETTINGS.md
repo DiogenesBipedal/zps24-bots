@@ -48,6 +48,12 @@ The bots watch one player, the host (server admins), and copy them. Per map, sav
   don't count.
 - **Fighting distances:** how far the nearest zombie is when you open fire, and when you start
   backing away. Survivor bots copy them after 20 and 10 samples.
+- **Camera at hold spots:** while you hold a spot, where you look (the points your view hits),
+  grouped into up to 4 watch directions per spot, and whether you hold it crouched. Survivor
+  bots on your spots crouch if you did and watch where you watched.
+- **Raw recording:** your movement and camera, 10 times a second (position, view angles,
+  crouch, buttons, weapon, health), appended to `data/zps24_learn/rec/<map>.csv` for later
+  analysis.
 - **Furniture:** which pieces you shove or carry, and where you leave them (into a door, across
   the stairs, anywhere). Each round, a house's furniture-pushers put the same pieces in the same
   places before barricading the doors. Pieces are recognized by their map ID, so it works
@@ -63,6 +69,7 @@ The bots pick up new lessons at the next round.
 | `sm_zps24learn_enable` | 1 | Learn from the main player |
 | `sm_zps24learn_teacher` | (empty) | Learn only from the player whose name contains this; empty = server admins |
 | `sm_zps24learn_hold_time` | 10 | Seconds you must stay put for a hold spot |
+| `sm_zps24learn_record` | 1 | Record your movement and camera to `data/zps24_learn/rec/<map>.csv` |
 | `sm_zps24learn_debug` | 1 | Log each lesson to the SourceMod log |
 | `sm_zps24learn_status` | | What has been learned on this map |
 | `sm_zps24learn_forget` | | Forget this map's lessons |

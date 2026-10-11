@@ -32,11 +32,18 @@ public Plugin myinfo =
 #define TEAM_ZOMBIES   3
 #define TICK           0.25
 
-ConVar g_enable, g_holdTime, g_debug, g_teacher;
+ConVar g_enable, g_holdTime, g_debug, g_teacher, g_record;
+File   g_rec;                                // raw recording of the teacher for this map
 
 // Per human
 float g_anchor[MAXPLAYERS + 1][3];          // where they've been standing
 float g_anchorSince[MAXPLAYERS + 1];
+// While holding a spot: what the teacher looks at (the points their view hits) and how often
+// they're crouched.
+float g_lookPt[MAXPLAYERS + 1][64][3];
+int   g_lookN[MAXPLAYERS + 1];
+int   g_holdTicks[MAXPLAYERS + 1];
+int   g_crouchTicks[MAXPLAYERS + 1];
 bool  g_wasOnMesh[MAXPLAYERS + 1];          // has been on the mesh (so a trail has a start)
 bool  g_inTrail[MAXPLAYERS + 1];
 float g_lastOnMesh[MAXPLAYERS + 1][3];
@@ -63,6 +70,7 @@ public void OnPluginStart()
 	g_enable   = CreateConVar("sm_zps24learn_enable", "1", "Learn hold spots, routes and fighting distances from human survivors");
 	g_holdTime = CreateConVar("sm_zps24learn_hold_time", "10", "Seconds a human must stay put for the spot to count as a hold spot");
 	g_debug    = CreateConVar("sm_zps24learn_debug", "1", "Announce what was learned in the server log");
+	g_record   = CreateConVar("sm_zps24learn_record", "1", "Record the teacher's movement and camera (10 times a second) to data/zps24_learn/rec/<map>.csv");
 	g_teacher  = CreateConVar("sm_zps24learn_teacher", "", "Learn only from the player whose name contains this (empty = from server admins only)");
 	RegServerCmd("sm_zps24learn_status", Cmd_Status, "What the bots have learned on this map");
 	RegServerCmd("sm_zps24learn_forget", Cmd_Forget, "Forget everything learned on this map");
@@ -78,6 +86,7 @@ public void OnMapStart()
 	for (int t = 0; t < MAX_TRACK; t++)
 		g_trk[t] = INVALID_ENT_REFERENCE;
 	CreateTimer(TICK, Timer_Watch, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	CreateTimer(0.1, Timer_Record, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 
 void ResetClient(int client)
@@ -100,6 +109,63 @@ void Note(const char[] fmt, any ...)
 }
 
 // A human's hold spot ends when they move off it or die: keep it if they held it long enough.
+// Where the teacher watched from a spot: the points their view hit, grouped into 8 compass
+// sectors around the spot; every sector they looked into for at least 15% of the time becomes a
+// watch point (the average of the points in it), most-watched first, up to 4.
+void LearnLooks(int client, int k)
+{
+	int n = g_lookN[client];
+	if (n < 4)
+		return;
+	int count[8];
+	float sum[8][3];
+	for (int i = 0; i < n; i++)
+	{
+		float d[3];
+		SubtractVectors(g_lookPt[client][i], g_anchor[client], d);
+		float yaw = ArcTangent2(d[1], d[0]) * 180.0 / 3.14159265;
+		int sec = RoundToFloor((yaw + 202.5) / 45.0) % 8;
+		count[sec]++;
+		AddVectors(sum[sec], g_lookPt[client][i], sum[sec]);
+	}
+	float looks[4][3];
+	int got = 0;
+	bool used[8];
+	while (got < 4)
+	{
+		int b = -1;
+		for (int sc = 0; sc < 8; sc++)
+			if (!used[sc] && (b == -1 || count[sc] > count[b])) b = sc;
+		if (b == -1 || count[b] * 100 < n * 15 || count[b] < 2)
+			break;
+		used[b] = true;
+		for (int j = 0; j < 3; j++) looks[got][j] = sum[b][j] / float(count[b]);
+		got++;
+	}
+	if (got == 0)
+		return;
+	// Newest first; keep older ones that point somewhere else (more than 40 degrees apart).
+	float merged[4][3];
+	int m = 0;
+	for (int i = 0; i < got; i++) merged[m++] = looks[i];
+	for (int i = 0; i < g_ln_spotLookN[k] && m < 4; i++)
+	{
+		bool same = false;
+		for (int j = 0; j < got && !same; j++)
+		{
+			float a[3], b2[3];
+			SubtractVectors(g_ln_spotLook[k][i], g_ln_spots[k], a);
+			SubtractVectors(looks[j], g_ln_spots[k], b2);
+			a[2] = 0.0; b2[2] = 0.0;
+			NormalizeVector(a, a); NormalizeVector(b2, b2);
+			same = GetVectorDotProduct(a, b2) > 0.766;   // cos 40
+		}
+		if (!same) merged[m++] = g_ln_spotLook[k][i];
+	}
+	for (int i = 0; i < m; i++) g_ln_spotLook[k][i] = merged[i];
+	g_ln_spotLookN[k] = m;
+}
+
 void EndHold(int client, bool died)
 {
 	if (g_anchorSince[client] == 0.0)
@@ -125,8 +191,12 @@ void EndHold(int client, bool died)
 		}
 		g_ln_spots[best] = g_anchor[client];
 		g_ln_spotSecs[best] = 0.0;
+		g_ln_spotLookN[best] = 0;
+		g_ln_spotCrouch[best] = false;
 	}
 	g_ln_spotSecs[best] += secs;
+	LearnLooks(client, best);
+	g_ln_spotCrouch[best] = g_holdTicks[client] > 0 && g_crouchTicks[client] * 10 >= g_holdTicks[client] * 6;
 	Learned_Save();
 	Note("Learned hold spot %d at %.0f %.0f %.0f from %N (%.0f s, %.0f s in total)", best,
 		g_anchor[client][0], g_anchor[client][1], g_anchor[client][2], client, secs, g_ln_spotSecs[best]);
@@ -140,6 +210,52 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 		EndHold(client, true);
 		ResetClient(client);
 	}
+}
+
+bool TraceNoPlayers(int entity, int mask)
+{
+	return entity > MaxClients;
+}
+
+// Raw recording: the teacher's movement and camera, 10 times a second, one CSV per map:
+// time, team, alive, x, y, z, pitch, yaw, crouched, buttons, weapon, health
+Action Timer_Record(Handle timer)
+{
+	if (!g_record.BoolValue)
+		return Plugin_Continue;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsTeacher(client) || GetClientTeam(client) < TEAM_SURVIVORS)
+			continue;
+		if (g_rec == null)
+		{
+			char path[PLATFORM_MAX_PATH], map[64];
+			GetCurrentMap(map, sizeof(map));
+			BuildPath(Path_SM, path, sizeof(path), "data/zps24_learn/rec");
+			if (!DirExists(path)) CreateDirectory(path, 511);
+			BuildPath(Path_SM, path, sizeof(path), "data/zps24_learn/rec/%s.csv", map);
+			bool fresh = !FileExists(path);
+			g_rec = OpenFile(path, "a");
+			if (g_rec == null) return Plugin_Continue;
+			if (fresh) g_rec.WriteLine("time,team,alive,x,y,z,pitch,yaw,crouched,buttons,weapon,health");
+		}
+		bool alive = IsPlayerAlive(client);
+		float pos[3], ang[3];
+		GetClientAbsOrigin(client, pos);
+		GetClientEyeAngles(client, ang);
+		char weapon[32] = "-";
+		int w = alive ? GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") : -1;
+		if (w > 0) GetEntityClassname(w, weapon, sizeof(weapon));
+		g_rec.WriteLine("%.1f,%d,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%s,%d", GetGameTime(), GetClientTeam(client), alive ? 1 : 0,
+			pos[0], pos[1], pos[2], ang[0], ang[1], (GetEntityFlags(client) & FL_DUCKING) ? 1 : 0, GetClientButtons(client), weapon,
+			alive ? GetClientHealth(client) : 0);
+	}
+	return Plugin_Continue;
+}
+
+public void OnMapEnd()
+{
+	delete g_rec;                            // close (and flush) this map's recording
 }
 
 // Standing on the nav mesh: right over an area, at its height.
@@ -429,6 +545,29 @@ Action Timer_Watch(Handle timer)
 			EndHold(client, false);
 			g_anchor[client] = pos;
 			g_anchorSince[client] = GetGameTime();
+			g_lookN[client] = 0;
+			g_holdTicks[client] = 0;
+			g_crouchTicks[client] = 0;
+		}
+		if (survivor && g_anchorSince[client] != 0.0)
+		{
+			// Holding: sample the camera (what the view hits) and crouching.
+			float eye[3], ang[3], fwd[3], end[3];
+			GetClientEyePosition(client, eye);
+			GetClientEyeAngles(client, ang);
+			GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+			ScaleVector(fwd, 3000.0);
+			AddVectors(eye, fwd, end);
+			TR_TraceRayFilter(eye, end, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceNoPlayers);
+			TR_GetEndPosition(end);
+			int n = g_lookN[client];
+			if (n < 64)
+				g_lookPt[client][g_lookN[client]++] = end;
+			else
+				g_lookPt[client][GetRandomInt(0, 63)] = end;   // keep a fair sample of long holds
+			g_holdTicks[client]++;
+			if (GetEntityFlags(client) & FL_DUCKING)
+				g_crouchTicks[client]++;
 		}
 
 		// Routes off the nav mesh: from the last point on it to the first point back on it.
@@ -516,7 +655,8 @@ Action Cmd_Status(int args)
 		g_ln_spotCount, g_ln_routeCount, g_ln_placeCount, g_ln_entryCount, g_ln_shootN ? g_ln_shootSum / float(g_ln_shootN) : 0.0, g_ln_shootN,
 		g_ln_retreatN ? g_ln_retreatSum / float(g_ln_retreatN) : 0.0, g_ln_retreatN);
 	for (int i = 0; i < g_ln_spotCount; i++)
-		PrintToServer("  spot %d at %.0f %.0f %.0f held %.0f s", i, g_ln_spots[i][0], g_ln_spots[i][1], g_ln_spots[i][2], g_ln_spotSecs[i]);
+		PrintToServer("  spot %d at %.0f %.0f %.0f held %.0f s%s, %d watch points", i, g_ln_spots[i][0], g_ln_spots[i][1], g_ln_spots[i][2],
+			g_ln_spotSecs[i], g_ln_spotCrouch[i] ? ", crouched" : "", g_ln_spotLookN[i]);
 	for (int r = 0; r < g_ln_routeCount; r++)
 	{
 		int last = g_ln_routeLen[r] - 1;
@@ -555,7 +695,12 @@ Action Cmd_Drop(int args)
 	int i = StringToInt(num);
 	if (StrEqual(what, "spot") && i >= 0 && i < g_ln_spotCount)
 	{
-		for (int k = i; k < g_ln_spotCount - 1; k++) { g_ln_spots[k] = g_ln_spots[k + 1]; g_ln_spotSecs[k] = g_ln_spotSecs[k + 1]; }
+		for (int k = i; k < g_ln_spotCount - 1; k++)
+		{
+			g_ln_spots[k] = g_ln_spots[k + 1]; g_ln_spotSecs[k] = g_ln_spotSecs[k + 1];
+			g_ln_spotCrouch[k] = g_ln_spotCrouch[k + 1]; g_ln_spotLookN[k] = g_ln_spotLookN[k + 1];
+			for (int l = 0; l < 4; l++) g_ln_spotLook[k][l] = g_ln_spotLook[k + 1][l];
+		}
 		g_ln_spotCount--;
 	}
 	else if (StrEqual(what, "route") && i >= 0 && i < g_ln_routeCount)

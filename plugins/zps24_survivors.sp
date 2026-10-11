@@ -2005,6 +2005,20 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		strcopy(g_state[client], sizeof(g_state[]), "walking to defend spot");
 		return MoveTo(client, moveGoal);
 	}
+	// Holding one of the main player's spots: copy how they held it (crouched or not) and where
+	// they watched from it.
+	int ls = -1;
+	for (int k = 0; k < g_ln_spotCount; k++)
+		if (GetVectorDistance(g_ln_spots[k], spot) < 64.0) { ls = k; break; }
+	if (ls != -1 && g_ln_spotCrouch[ls])
+		NavBotPlayerControllerInterface.PressButtonByID(bot.GetPlayerControllerInterface(), NAVBOT_BUTTON_CROUCH, 0.3);
+	if (ls != -1 && g_ln_spotLookN[ls] > 0 && GetGameTime() >= g_lookAround[client])
+	{
+		g_lookAround[client] = GetGameTime() + GetRandomFloat(2.5, 5.0);
+		float watch[3];
+		watch = g_ln_spotLook[ls][GetRandomInt(0, g_ln_spotLookN[ls] - 1)];
+		NavBotPlayerControllerInterface.AimAtPos(bot.GetPlayerControllerInterface(), watch, LOOK_SEARCH, 2.0, "Watching where the main player watched");
+	}
 	if (GetGameTime() >= g_lookAround[client])
 	{
 		// Watch one of the home's doors or windows, gun ready.

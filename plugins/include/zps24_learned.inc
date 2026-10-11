@@ -24,6 +24,9 @@
 int   g_ln_spotCount;
 float g_ln_spots[LEARN_MAX_SPOTS][3];
 float g_ln_spotSecs[LEARN_MAX_SPOTS];        // total seconds humans held it
+float g_ln_spotLook[LEARN_MAX_SPOTS][4][3];  // where the human watched from it (points their view hit)
+int   g_ln_spotLookN[LEARN_MAX_SPOTS];
+bool  g_ln_spotCrouch[LEARN_MAX_SPOTS];      // they held it crouched
 
 int   g_ln_routeCount;
 int   g_ln_routeLen[LEARN_MAX_ROUTES];
@@ -91,6 +94,17 @@ void Learned_Load()
 			if (g_ln_spotCount >= LEARN_MAX_SPOTS) break;
 			kv.GetVector("pos", g_ln_spots[g_ln_spotCount]);
 			g_ln_spotSecs[g_ln_spotCount] = kv.GetFloat("secs");
+			g_ln_spotCrouch[g_ln_spotCount] = kv.GetNum("crouch") != 0;
+			g_ln_spotLookN[g_ln_spotCount] = 0;
+			for (int l = 0; l < 4; l++)
+			{
+				char lk[8];
+				Format(lk, sizeof(lk), "look%d", l);
+				float v[3] = { 999999.0, 0.0, 0.0 };
+				kv.GetVector(lk, v, v);
+				if (v[0] == 999999.0) break;
+				g_ln_spotLook[g_ln_spotCount][g_ln_spotLookN[g_ln_spotCount]++] = v;
+			}
 			g_ln_spotCount++;
 		} while (kv.GotoNextKey());
 	}
@@ -167,6 +181,13 @@ stock void Learned_Save()
 		kv.JumpToKey(key, true);
 		kv.SetVector("pos", g_ln_spots[i]);
 		kv.SetFloat("secs", g_ln_spotSecs[i]);
+		kv.SetNum("crouch", g_ln_spotCrouch[i] ? 1 : 0);
+		for (int l = 0; l < g_ln_spotLookN[i]; l++)
+		{
+			char lk[8];
+			Format(lk, sizeof(lk), "look%d", l);
+			kv.SetVector(lk, g_ln_spotLook[i][l]);
+		}
 		kv.GoBack();
 	}
 	kv.Rewind();

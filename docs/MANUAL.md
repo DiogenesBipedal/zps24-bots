@@ -1425,6 +1425,18 @@ Learning from everyone would mix good habits with bad ones.
      the bot presses jump and holds crouch, the HL2 crouch-jump players use to climb. The
      recorded climb went ground 8 → car 28 → 81 → 130 → roof 168: four jumps.
 
+7. **Camera and posture at hold spots** ("record my movements and camera and learn"). While the
+   teacher holds a spot, every 0.25 s the plugin traces their view (eyes along the view
+   direction, world only) and keeps the hit point, a fair sample of up to 64 per hold, plus
+   whether they're crouched. When they leave, the points are grouped into 8 compass sectors
+   around the spot; every sector they watched at least 15% of the time becomes a watch point
+   (the average hit point), up to 4, merged with earlier ones that point elsewhere. Crouched
+   60%+ of the time marks the spot as a crouch spot. A survivor bot holding that spot crouches
+   if the teacher did and looks at the teacher's watch points instead of random doors and
+   windows.
+8. **A raw recording** of everything, 10 times a second, as CSV per map (`rec/<map>.csv`): the
+   material for anything else worth learning later (aim habits, movement between spots).
+
 The file is a KeyValues text file per map in `data/zps24_learn/`, readable and editable by hand.
 
 **How the bots use it** (`include/zps24_learned.inc`, loaded at map and round start):
