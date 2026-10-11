@@ -72,8 +72,8 @@ running (a few minutes; the server saves it):
 scripts/zps24-server.sh navgen
 ```
 
-The included map rotation (cabin, church and cinema) switches map every 2 rounds. Nav meshes for
-29 maps are included, so bots work on almost every stock map. Change maps any time
+The included map rotation has all 29 maps with nav meshes (cabin, church and cinema first) and
+switches map every 2 rounds. Change maps any time
 from the admin menu or with `scripts/zps24-server.sh cmd "changelevel <map>"`.
 
 ### Server commands
@@ -126,7 +126,7 @@ Everything can be changed in `~/zps24-server/zps/cfg/server.cfg` or live with
 | `sm_zps24ai_infinite_ammo` | 1 | Survivor bots never run dry |
 | `sm_zps24ai_engage_range` | 700 | How far survivor bots shoot zombies from |
 | `sm_zps24_humans_survive` | 1 | Human players always start as survivors |
-| `sm_ammorespawn_maps` | `cabin,church` | Maps where ammo respawns (empty = all) |
+| `sm_ammorespawn_maps` | (empty) | Maps where ammo respawns (empty = all) |
 | `sm_ammorespawn_delay` | 30 | Seconds before picked-up ammo comes back |
 | `mp_maxrounds` | 2 | Rounds before the next map in the rotation |
 

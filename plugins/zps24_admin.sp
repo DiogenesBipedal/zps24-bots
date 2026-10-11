@@ -389,13 +389,27 @@ int Menu_Bots(Menu menu, MenuAction action, int client, int item)
 	return 0;
 }
 
+// The maps of the rotation (mapcycle_bots.txt: every map with a nav mesh), else a short built-in list.
 void ShowMapMenu(int client)
 {
 	Menu m = new Menu(Menu_Map);
 	m.SetTitle("Change map");
-	for (int i = 0; i < sizeof(g_maps); i++)
-		if (IsMapValid(g_maps[i]))
-			m.AddItem(g_maps[i], g_maps[i]);
+	File f = OpenFile("mapcycle_bots.txt", "r");
+	if (f != null)
+	{
+		char line[64];
+		while (f.ReadLine(line, sizeof(line)))
+		{
+			TrimString(line);
+			if (line[0] != '\0' && line[0] != '/' && IsMapValid(line))
+				m.AddItem(line, line);
+		}
+		delete f;
+	}
+	if (m.ItemCount == 0)
+		for (int i = 0; i < sizeof(g_maps); i++)
+			if (IsMapValid(g_maps[i]))
+				m.AddItem(g_maps[i], g_maps[i]);
 	m.ExitBackButton = true;
 	m.Display(client, MENU_TIME_FOREVER);
 }

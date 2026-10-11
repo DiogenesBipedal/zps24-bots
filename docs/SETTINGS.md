@@ -95,7 +95,7 @@ The bots pick up new lessons at the next round.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `sm_ammorespawn_maps` | `cabin,church` | Map name fragments where ammo respawns (empty = every map) |
+| `sm_ammorespawn_maps` | (empty) | Map name fragments where ammo respawns (empty = every map) |
 | `sm_ammorespawn_delay` | 30 | Seconds before picked-up ammo comes back |
 
 ## Radio (zps24_radio)
@@ -148,9 +148,9 @@ somewhere on a map.
 
 ## Map rotation
 
-`server.cfg` points `mapcyclefile` at `mapcycle_bots.txt` (cabin, church and cinema) and sets
-`mp_maxrounds 2`, so the map changes every 2 rounds. To add a map, put it in
-`zps/mapcycle_bots.txt`.
+`server.cfg` points `mapcyclefile` at `mapcycle_bots.txt`: every map with a nav mesh (29;
+cabin, church and cinema first). `mp_maxrounds 2` changes map every 2 rounds. The admin menu's
+"Change map" lists the same maps. To add or remove a map, edit `zps/mapcycle_bots.txt`.
 
 ## Nav meshes
 

@@ -34,7 +34,7 @@ bool g_active;
 
 public void OnPluginStart()
 {
-	g_maps = CreateConVar("sm_ammorespawn_maps", "cabin,church,cinema", "Comma-separated map name fragments where ammo respawns (empty = all maps)");
+	g_maps = CreateConVar("sm_ammorespawn_maps", "", "Comma-separated map name fragments where ammo respawns (empty = all maps)");
 	g_delay = CreateConVar("sm_ammorespawn_delay", "30", "Seconds before picked-up ammo respawns", _, true, 1.0);
 	AutoExecConfig(true, "zps24_ammorespawn");
 
