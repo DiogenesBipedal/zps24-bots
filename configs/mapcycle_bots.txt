@@ -27,3 +27,7 @@ zps_silence
 zps_thrillvile
 zps_town
 zps_underground
+zpo_lake_silence_sfr_v9
+zpo_lake_dead_sfr_v10
+zpo_lake_plasterd_sfr_v10
+zpo_lake_of_the_dead_v1b

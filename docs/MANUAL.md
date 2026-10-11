@@ -1700,6 +1700,34 @@ Bots used to walk into these and stand there (survivors), or smash them (zombies
   breach logic (break the bar, smash the door); survivors walk around, because they never break
   doors (except basement doors, 11.12).
 
+### 11.14 Playing ZPS 3.x maps on 2.4 (the lake maps)
+
+The four lake maps (zpo_lake_of_the_dead_v1b, zpo_lake_silence_sfr_v9, zpo_lake_dead_sfr_v10,
+zpo_lake_plasterd_sfr_v10) came from the Steam Workshop for ZPS 3.x. Copied as they are, all four
+crash the 2.4 server while loading. Three reasons, all fixed by `tools/bsp_to_24.py`:
+
+1. **Static props, version 10.** The map compiler for 3.x (Source 2013) writes static props as
+   version 10; the 2.4 engine (Source 2007) reads up to version 6 and segfaults. A v10 record
+   begins with the v6 fields, so the tool keeps those 60 bytes, adds v6's two DX-level fields,
+   and rewrites the game lump at the end of the file.
+2. **3.x item names.** `item_ammo_rifle`, `_shotgun`, `_revolver`, barricade ammo and pills don't
+   exist in 2.4, so those maps had almost no ammo. They are renamed to the 2.4 items
+   (`item_ammo_rifle_clip`, `item_ammo_shotgun_clip`, `item_ammo_357`, the hammer, the health vial).
+   2.4 skips the rest (armor, item crates, 3.x round logic).
+3. **Physics props (lake_of_the_dead only).** The map crashed in
+   `CPhysicsPropMultiplayer::Spawn`. Bisecting the 126 props (keep the first N, test, halve)
+   found an `airboat_broken_engine` gib, which is now dropped. After that it still crashed past
+   about 80 identical shelves, so it's a limit, not a bad model. With `--physprops` they become
+   plain `prop_physics`, and the map loads. Furniture still moves and shoves the same way.
+
+The client needs the same converted file: copy it into the 2.4 install's `zps/maps` too.
+Otherwise the CRCs differ and the client refuses the map. Each map then got a nav mesh on the
+test server (port 27035) and joined `mapcycle_bots.txt`.
+
+How to test a map without disturbing the game: `zps24-test-server.sh start <map>`, then
+`zps24-test-server.sh cmd status`. If no `map :` line comes back, it crashed. To see where, run
+the same srcds command under `gdb -batch -ex run -ex bt`.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
