@@ -37,7 +37,18 @@ public Plugin myinfo =
 #define MAX_OPENINGS   64
 
 ConVar g_giveWeapons, g_infiniteAmmo, g_needTool, g_engageRange;
-ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOpening, g_debug, g_upperHeight, g_furniture, g_learnedStyle;
+ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOpening, g_debug, g_upperHeight, g_furniture, g_learnedStyle, g_builders;
+
+// Builders: a few survivor bots per house that trade their melee weapon for the barricade hammer
+// and nail boards where the main player nailed them (zps24_learn "boards").
+bool  g_builder[MAXPLAYERS + 1];
+int   g_buildLesson[MAXPLAYERS + 1] = { -1, ... };
+int   g_buildTries[MAXPLAYERS + 1];
+int   g_hammerFails[MAXPLAYERS + 1];       // offered the hammer and still don't have it
+int   g_spawnedHammer[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
+float g_buildRecheck[MAXPLAYERS + 1];
+int   g_boardClaim[LEARN_MAX_BOARDS];      // builder working on it (0 = nobody)
+bool  g_boardGiveUp[LEARN_MAX_BOARDS];     // couldn't nail it this round
 
 // Distances to fight at: the settings, or what the main player does (zps24_learn).
 float EngageRange()
@@ -100,7 +111,7 @@ bool  g_mapPreferUp;
 int   g_badHoldoutCount;
 
 // Per-bot state
-enum BotJob { JOB_NONE, JOB_BARRICADE, JOB_PLACE }   // JOB_PLACE: copy a learned furniture placement
+enum BotJob { JOB_NONE, JOB_BARRICADE, JOB_PLACE, JOB_BUILD }   // JOB_PLACE: copy a learned furniture placement; JOB_BUILD: nail the main player's boards
 BotJob g_job[MAXPLAYERS + 1];
 int    g_jobOpening[MAXPLAYERS + 1];
 int    g_jobPlace[MAXPLAYERS + 1];       // learned placement being copied (JOB_PLACE)
@@ -160,6 +171,7 @@ public void OnPluginStart()
 	g_boardsPerOpening = CreateConVar("sm_zps24ai_boards", "3", "Boards to put on each door/window");
 	g_debug            = CreateConVar("sm_zps24ai_debug", "0", "Log AI decisions");
 	g_upperHeight      = CreateConVar("sm_zps24ai_upper_height", "80", "Nav areas this much above the hold-out floor count as upper floor / roof / balcony");
+	g_builders         = CreateConVar("sm_zps24ai_builders", "2", "Survivor bots (in total, at most one per house) that swap their melee weapon for the barricade hammer and nail boards where the main player nailed them (0 = off)");
 	g_learnedStyle     = CreateConVar("sm_zps24ai_learned_style", "1", "Use the shooting and backing-off distances learned from the main player (zps24_learn) once there are enough samples");
 	g_furniture        = CreateConVar("sm_zps24ai_furniture", "1", "Barricaders without a barricade tool carry furniture to the openings");
 	AutoExecConfig(true, "zps24_survivors");
@@ -248,6 +260,8 @@ void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 		return;
 	g_home[client] = -1;
 	g_haveSpawn[client] = false;
+	g_builder[client] = false;
+	g_hammerFails[client] = 0;
 	CreateTimer(0.2, Timer_RecordSpawn, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 }
 
@@ -340,6 +354,17 @@ void ResetRound()
 		g_placeHome[k] = -1;
 		g_placeClaim[k] = 0;
 		g_placeDone[k] = false;
+	}
+	for (int b = 0; b < LEARN_MAX_BOARDS; b++)
+	{
+		g_boardClaim[b] = 0;
+		g_boardGiveUp[b] = false;
+	}
+	for (int i = 0; i <= MaxClients; i++)
+	{
+		g_builder[i] = false;
+		g_buildLesson[i] = -1;
+		g_hammerFails[i] = 0;
 	}
 	for (int i = 0; i <= MaxClients; i++)
 	{
@@ -970,7 +995,7 @@ int CountBarricaders(int h)
 {
 	int n = 0;
 	for (int i = 1; i <= MaxClients; i++)
-		if (g_job[i] != JOB_NONE && g_home[i] == h && IsClientInGame(i) && IsPlayerAlive(i))
+		if (g_job[i] != JOB_NONE && g_job[i] != JOB_BUILD && g_home[i] == h && IsClientInGame(i) && IsPlayerAlive(i))
 			n++;
 	return n;
 }
@@ -984,6 +1009,12 @@ void ReleaseJob(int client, bool done)
 		g_placeClaim[k] = 0;
 		if (done)
 			g_placeDone[k] = true;
+	}
+	int bl = g_buildLesson[client];
+	if (g_job[client] == JOB_BUILD && bl >= 0 && bl < LEARN_MAX_BOARDS)
+	{
+		g_boardClaim[bl] = 0;
+		g_buildLesson[client] = -1;
 	}
 	if (g_job[client] == JOB_BARRICADE && o >= 0 && o < g_openingCount)
 	{
@@ -1300,6 +1331,210 @@ bool DoPlace(int client, NavBot bot, float moveGoal[3])
 			ReleaseJob(client, true);
 		}
 		case PUSH_GIVEUP: ReleaseJob(client, true);
+	}
+	return false;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Builders: nail boards where the main player nailed them
+
+// The main player's boards in this home that aren't up right now (never built, or broken by
+// zombies) and that nobody is working on.
+int NextBoardLesson(int client)
+{
+	int h = g_home[client];
+	if (h < 0)
+		return -1;
+	float me[3];
+	GetClientAbsOrigin(client, me);
+	float r = (g_mapHome && g_mapRadius > 0.0 ? g_mapRadius : g_radius.FloatValue) * 1.3;
+	int best = -1;
+	float bestDist = 999999.0;
+	for (int b = 0; b < g_ln_boardCount; b++)
+	{
+		if (g_boardGiveUp[b] || (g_boardClaim[b] != 0 && g_boardClaim[b] != client))
+			continue;
+		if (GetVectorDistance(g_ln_boardPos[b], g_homePos[h]) > r)
+			continue;
+		if (CountBoardsNear(g_ln_boardPos[b], 40.0) > 0)
+			continue;                        // it's up
+		float d = GetVectorDistance(me, g_ln_boardStand[b]);
+		if (d < bestDist) { bestDist = d; best = b; }
+	}
+	return best;
+}
+
+// The builder's melee weapon (keyboard, frying pan, ...): anything that isn't a gun, the hands,
+// the phone or the hammer.
+int MeleeWeapon(int client)
+{
+	char cls[64];
+	int size = GetEntPropArraySize(client, Prop_Send, "m_hMyWeapons");
+	for (int i = 0; i < size; i++)
+	{
+		int w = GetEntPropEnt(client, Prop_Send, "m_hMyWeapons", i);
+		if (w <= 0 || !IsValidEntity(w) || IsGun(w))
+			continue;
+		GetEntityClassname(w, cls, sizeof(cls));
+		if (!StrEqual(cls, "weapon_emptyhand") && !StrEqual(cls, "weapon_phone") && !StrEqual(cls, "weapon_barricade"))
+			return w;
+	}
+	return -1;
+}
+
+// Get the hammer: drop the melee weapon (and, if the hammer still won't come, the main gun too:
+// ZPS 2.4's weight limit), then take a hammer lying nearby or a fresh one, through the real E
+// key (equipping it directly crashes in CWeapon_Barricade::Deploy).
+// Returns true while walking to moveGoal.
+bool GetHammer(int client, NavBot bot, float moveGoal[3])
+{
+	if (GetGameTime() < g_nextUse[client])
+		return false;
+	int melee = MeleeWeapon(client);
+	if (melee != -1)
+	{
+		if (GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != melee)
+		{
+			char cls[64], cmd[80];
+			GetEntityClassname(melee, cls, sizeof(cls));
+			Format(cmd, sizeof(cmd), "use %s", cls);
+			bot.DelayedFakeClientCommand(cmd);
+		}
+		else
+		{
+			bot.DelayedFakeClientCommand("dropweapon");
+			Debug("%N (builder) drops its melee weapon for the hammer", client);
+		}
+		g_nextUse[client] = GetGameTime() + 0.6;
+		return false;
+	}
+	if (g_hammerFails[client] >= 3 && ShedWeight(client, bot))
+		return false;                        // still too heavy: drop the main gun as well
+
+	int hammer = EntRefToEntIndex(g_spawnedHammer[client]);
+	if (hammer != INVALID_ENT_REFERENCE && GetEntPropEnt(hammer, Prop_Send, "m_hOwnerEntity") != -1)
+		hammer = INVALID_ENT_REFERENCE;      // someone took it
+	if (hammer == INVALID_ENT_REFERENCE)
+	{
+		float dist;
+		int free = NearestFreeBarricade(client, dist);
+		if (free != -1 && dist < 600.0)
+		{
+			if (dist > 140.0)
+			{
+				float toolPos[3];
+				GetEntPropVector(free, Prop_Data, "m_vecAbsOrigin", toolPos);
+				SnapToNav(toolPos, moveGoal);
+				return true;
+			}
+			hammer = free;
+		}
+		else
+		{
+			hammer = CreateEntityByName("weapon_barricade");
+			if (hammer == -1)
+				return false;
+			DispatchSpawn(hammer);
+		}
+		g_spawnedHammer[client] = EntIndexToEntRef(hammer);
+	}
+	else
+		g_hammerFails[client]++;             // offered last time, still not ours
+
+	float eye[3], ang[3], fwd[3], spot[3];
+	GetClientEyePosition(client, eye);
+	GetClientEyeAngles(client, ang);
+	ang[0] = 0.0;
+	GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+	ScaleVector(fwd, 30.0);
+	AddVectors(eye, fwd, spot);
+	spot[2] -= 20.0;
+	TeleportEntity(hammer, spot, NULL_VECTOR, view_as<float>({0.0, 0.0, 0.0}));
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, spot, LOOK_USE, 0.6, "Picking up the hammer");
+	NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.3);
+	g_nextUse[client] = GetGameTime() + 1.2;
+	return false;
+}
+
+// The build job: hammer in hand, go where the main player stood, aim where they aimed, hold attack
+// through the whole hammer animation (the board only goes up at its end), check it went up.
+// Returns true while walking to moveGoal.
+bool DoBuild(int client, NavBot bot, float moveGoal[3])
+{
+	int tool = FindOwnedWeapon(client, "weapon_barricade");
+	if (tool == -1)
+		return GetHammer(client, bot, moveGoal);
+	g_hammerFails[client] = 0;
+	g_spawnedHammer[client] = INVALID_ENT_REFERENCE;
+
+	int b = g_buildLesson[client];
+	if (b < 0 || CountBoardsNear(g_ln_boardPos[b], 40.0) > 0)
+	{
+		if (b >= 0) g_boardClaim[b] = 0;
+		b = NextBoardLesson(client);
+		g_buildLesson[client] = b;
+		g_buildTries[client] = 0;
+		g_hammerUntil[client] = 0.0;
+		if (b < 0)
+		{
+			ReleaseJob(client, true);        // all of them are up
+			return false;
+		}
+		g_boardClaim[b] = client;
+		g_jobStarted[client] = GetGameTime();
+	}
+	if (GetGameTime() - g_jobStarted[client] > 60.0)
+	{
+		g_boardGiveUp[b] = true;             // can't get there or can't nail it
+		ReleaseJob(client, false);
+		return false;
+	}
+
+	float me[3], stand[3];
+	GetClientAbsOrigin(client, me);
+	SnapToNav(g_ln_boardStand[b], stand);
+	if (GetVectorDistance(me, stand) > 32.0 && g_hammerUntil[client] == 0.0)
+	{
+		moveGoal = stand;
+		return true;
+	}
+	if (GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != tool)
+	{
+		if (GetGameTime() >= g_nextUse[client])
+		{
+			bot.DelayedFakeClientCommand("use weapon_barricade");
+			g_nextUse[client] = GetGameTime() + 0.5;
+		}
+		return false;
+	}
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, g_ln_boardAim[b], LOOK_PRIORITY, 0.5, "Nailing a board");
+	if (g_hammerUntil[client] == 0.0)
+	{
+		if (!NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+			return false;
+		g_hammerUntil[client] = GetGameTime() + 4.5;
+		g_hammerBoardsBefore[client] = CountBoardsNear(g_ln_boardPos[b], 60.0);
+	}
+	if (GetGameTime() < g_hammerUntil[client])
+	{
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.3);
+		return false;
+	}
+	g_hammerUntil[client] = 0.0;
+	if (CountBoardsNear(g_ln_boardPos[b], 60.0) > g_hammerBoardsBefore[client])
+	{
+		Debug("%N nailed the main player's board %d", client, b);
+		g_boardClaim[b] = 0;
+		g_buildLesson[client] = -1;          // next one
+	}
+	else if (++g_buildTries[client] >= 3)
+	{
+		Debug("%N: board %d won't go up, skipping it this round", client, b);
+		g_boardGiveUp[b] = true;
+		g_boardClaim[b] = 0;
+		g_buildLesson[client] = -1;
 	}
 	return false;
 }
@@ -1941,6 +2176,18 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		g_shoveUntil[client] = 0.0;
 	}
 
+	if (g_job[client] == JOB_BUILD)
+	{
+		if (DoBuild(client, bot, moveGoal))
+		{
+			strcopy(g_state[client], sizeof(g_state[]), "building: walking");
+			routeType = NAVBOT_SAFEST_ROUTE;
+			return MoveTo(client, moveGoal);
+		}
+		strcopy(g_state[client], sizeof(g_state[]), FindOwnedWeapon(client, "weapon_barricade") == -1 ? "building: getting the hammer" : "building: hammering");
+		return Hold(client);
+	}
+
 	if (g_job[client] == JOB_PLACE)
 	{
 		if (DoPlace(client, bot, moveGoal))
@@ -2132,6 +2379,35 @@ Action Timer_Think(Handle timer)
 			continue;
 
 		// Hand out barricade jobs.
+		// Builders: a few per house; they take the build job whenever one of the main player's
+		// boards in the house is missing (never built, or broken by zombies).
+		if (!g_builder[client] && g_builders.IntValue > 0 && g_job[client] == JOB_NONE)
+		{
+			int all = 0, here = 0;
+			for (int o = 1; o <= MaxClients; o++)
+				if (g_builder[o] && IsClientInGame(o) && IsPlayerAlive(o))
+				{
+					all++;
+					if (g_home[o] == g_home[client]) here++;
+				}
+			if (all < g_builders.IntValue && here == 0)   // a few in total, one per house
+			{
+				g_builder[client] = true;
+				Debug("%N is a builder", client);
+			}
+		}
+		if (g_builder[client] && g_job[client] == JOB_NONE && GetGameTime() >= g_buildRecheck[client])
+		{
+			g_buildRecheck[client] = GetGameTime() + 10.0;
+			// No hammer yet (trade the melee weapon for one right away), or a board to put up.
+			if (FindOwnedWeapon(client, "weapon_barricade") == -1 || NextBoardLesson(client) != -1)
+			{
+				g_job[client] = JOB_BUILD;
+				g_buildLesson[client] = -1;
+				g_jobStarted[client] = GetGameTime();
+				Debug("%N builds the main player's boards", client);
+			}
+		}
 		if (g_job[client] == JOB_NONE && CountBarricaders(g_home[client]) < g_barricaders.IntValue)
 		{
 			int k = ClaimPlacement(client);
@@ -2250,7 +2526,8 @@ Action Cmd_Bots(int args)
 			NavBotBehaviorInterface.GetTaskDebugString(NavBotManager.GetNavBotByIndex(i).GetBehaviorInterface(), task, sizeof(task));
 		int aw = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
 		if (aw > 0) GetEntityClassname(aw, active, sizeof(active));
-		PrintToServer("%N at %.0f %.0f %.0f home %d job %d | %s | stuck %.0f s | %s | %s", i, me[0], me[1], me[2], g_home[i], g_job[i],
+		PrintToServer("%N at %.0f %.0f %.0f home %d job %d%s%s | %s | stuck %.0f s | %s | %s", i, me[0], me[1], me[2], g_home[i], g_job[i],
+			g_builder[i] ? " BUILDER" : "", FindOwnedWeapon(i, "weapon_barricade") != -1 ? " +hammer" : "",
 			g_state[i], Unstick_StuckFor(i), active, task);
 	}
 	return Plugin_Handled;

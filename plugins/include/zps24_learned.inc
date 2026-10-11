@@ -20,6 +20,7 @@
 #define LEARN_MAX_POINTS  24
 #define LEARN_MAX_PLACES  32
 #define LEARN_MAX_ENTRIES 32
+#define LEARN_MAX_BOARDS  48
 
 int   g_ln_spotCount;
 float g_ln_spots[LEARN_MAX_SPOTS][3];
@@ -43,6 +44,11 @@ int   g_ln_entryCount;
 float g_ln_entryOut[LEARN_MAX_ENTRIES][3];
 float g_ln_entryIn[LEARN_MAX_ENTRIES][3];
 int   g_ln_entryUses[LEARN_MAX_ENTRIES];
+
+int   g_ln_boardCount;                       // boards the human nailed with the hammer
+float g_ln_boardStand[LEARN_MAX_BOARDS][3];  // where they stood
+float g_ln_boardAim[LEARN_MAX_BOARDS][3];    // the point they aimed at (where their view hit)
+float g_ln_boardPos[LEARN_MAX_BOARDS][3];    // where the board ended up
 
 float g_ln_shootSum, g_ln_retreatSum;        // sums of distances to the nearest zombie
 int   g_ln_shootN, g_ln_retreatN;
@@ -75,6 +81,7 @@ void Learned_Load()
 	g_ln_routeCount = 0;
 	g_ln_placeCount = 0;
 	g_ln_entryCount = 0;
+	g_ln_boardCount = 0;
 	g_ln_shootSum = 0.0; g_ln_retreatSum = 0.0;
 	g_ln_shootN = 0; g_ln_retreatN = 0;
 	char path[PLATFORM_MAX_PATH];
@@ -159,6 +166,18 @@ void Learned_Load()
 		} while (kv.GotoNextKey());
 	}
 	kv.Rewind();
+	if (kv.JumpToKey("boards") && kv.GotoFirstSubKey())
+	{
+		do
+		{
+			if (g_ln_boardCount >= LEARN_MAX_BOARDS) break;
+			int b = g_ln_boardCount++;
+			kv.GetVector("stand", g_ln_boardStand[b]);
+			kv.GetVector("aim", g_ln_boardAim[b]);
+			kv.GetVector("board", g_ln_boardPos[b]);
+		} while (kv.GotoNextKey());
+	}
+	kv.Rewind();
 	if (kv.JumpToKey("style"))
 	{
 		g_ln_shootSum = kv.GetFloat("shoot_sum");
@@ -229,6 +248,17 @@ stock void Learned_Save()
 		kv.GoBack();
 	}
 	kv.Rewind();
+	kv.JumpToKey("boards", true);
+	for (int b = 0; b < g_ln_boardCount; b++)
+	{
+		IntToString(b, key, sizeof(key));
+		kv.JumpToKey(key, true);
+		kv.SetVector("stand", g_ln_boardStand[b]);
+		kv.SetVector("aim", g_ln_boardAim[b]);
+		kv.SetVector("board", g_ln_boardPos[b]);
+		kv.GoBack();
+	}
+	kv.Rewind();
 	kv.JumpToKey("style", true);
 	kv.SetFloat("shoot_sum", g_ln_shootSum);
 	kv.SetNum("shoot_n", g_ln_shootN);
@@ -293,4 +323,14 @@ stock float Learned_SpaceAbove(const float from[3])
 stock bool Learned_Indoors(const float pos[3])
 {
 	return Learned_SpaceAbove(pos) < 400.0;
+}
+
+// Is this entity a board nailed up with the barricade hammer?
+stock bool Learned_IsBoard(int ent)
+{
+	if (ent <= MaxClients || !IsValidEntity(ent) || !HasEntProp(ent, Prop_Data, "m_ModelName"))
+		return false;
+	char model[128];
+	GetEntPropString(ent, Prop_Data, "m_ModelName", model, sizeof(model));
+	return StrContains(model, "barricades/barricade_", false) != -1;
 }

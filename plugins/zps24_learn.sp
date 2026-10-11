@@ -7,6 +7,8 @@
 //   style       how far the nearest zombie is when they open fire, and when they back away
 //   furniture   which pieces they move (shove or carry) and where they leave them: the
 //               survivor bots' barricaders put the same pieces in the same places
+//   boards      (as a survivor, with the barricade hammer) every board they nail: where they
+//               stood, where they aimed, where the board went; survivor builders copy them
 //   entries     (as a zombie) where they get into buildings: the last point outside and the
 //               first point inside; zombie bots attack houses through these first
 //
@@ -62,7 +64,9 @@ int   g_trk[MAX_TRACK];                      // entity references
 float g_trkStart[MAX_TRACK][3];              // where it was before this move
 float g_trkLast[MAX_TRACK][3];               // last tick
 bool  g_trkMoved[MAX_TRACK];                 // moved by the teacher
-float g_handsOn[MAXPLAYERS + 1];             // last time the teacher pressed use / shove / attack
+float g_handsOn[MAXPLAYERS + 1];
+int   g_knownBoard[256];                     // boards that existed already (entity references)
+int   g_knownBoardCount;             // last time the teacher pressed use / shove / attack
 bool  g_wasRetreating[MAXPLAYERS + 1];
 
 public void OnPluginStart()
@@ -74,8 +78,9 @@ public void OnPluginStart()
 	g_teacher  = CreateConVar("sm_zps24learn_teacher", "", "Learn only from the player whose name contains this (empty = from server admins only)");
 	RegServerCmd("sm_zps24learn_status", Cmd_Status, "What the bots have learned on this map");
 	RegServerCmd("sm_zps24learn_forget", Cmd_Forget, "Forget everything learned on this map");
-	RegServerCmd("sm_zps24learn_drop", Cmd_Drop, "sm_zps24learn_drop <spot|route|furniture|entry> <index>: forget one lesson");
+	RegServerCmd("sm_zps24learn_drop", Cmd_Drop, "sm_zps24learn_drop <spot|route|furniture|board|entry> <index>: forget one lesson");
 	HookEventEx("player_death", Event_PlayerDeath, EventHookMode_Post);
+	HookEventEx("game_round_restart", Event_RoundRestart, EventHookMode_PostNoCopy);
 }
 
 public void OnMapStart()
@@ -85,6 +90,7 @@ public void OnMapStart()
 		ResetClient(i);
 	for (int t = 0; t < MAX_TRACK; t++)
 		g_trk[t] = INVALID_ENT_REFERENCE;
+	g_knownBoardCount = 0;
 	CreateTimer(TICK, Timer_Watch, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 	CreateTimer(0.1, Timer_Record, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -383,6 +389,78 @@ void RecordEntry(int client, const float out[3], const float inside[3])
 }
 
 // ---------------------------------------------------------------------------------------------
+// Boards the teacher nails
+
+void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
+{
+	g_knownBoardCount = 0;                   // all gone with the new round
+}
+
+bool IsKnownBoard(int ref)
+{
+	for (int i = 0; i < g_knownBoardCount; i++)
+		if (g_knownBoard[i] == ref)
+			return true;
+	return false;
+}
+
+void MarkBoard(int ref)
+{
+	if (g_knownBoardCount < sizeof(g_knownBoard))
+		g_knownBoard[g_knownBoardCount++] = ref;
+	else
+		g_knownBoard[GetRandomInt(0, sizeof(g_knownBoard) - 1)] = ref;
+}
+
+// A board that wasn't there before, right next to the teacher, who's holding the hammer and has
+// just swung: they nailed it. Record where they stood, what they aimed at, where it went.
+void WatchBoards(int teacher)
+{
+	float me[3];
+	GetClientAbsOrigin(teacher, me);
+	int w = GetEntPropEnt(teacher, Prop_Send, "m_hActiveWeapon");
+	char cls[32] = "";
+	if (w > 0) GetEntityClassname(w, cls, sizeof(cls));
+	bool hammering = StrEqual(cls, "weapon_barricade") && GetGameTime() - g_handsOn[teacher] < 3.0;
+	int ent = -1;
+	while ((ent = FindEntityByClassname(ent, "prop_physics")) != -1)
+	{
+		if (!Learned_IsBoard(ent))
+			continue;
+		int ref = EntIndexToEntRef(ent);
+		if (IsKnownBoard(ref))
+			continue;
+		MarkBoard(ref);
+		float pos[3];
+		GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", pos);
+		if (!hammering || GetVectorDistance(pos, me) > 220.0)
+			continue;                        // someone else's board
+		float eye[3], ang[3], fwd[3], aim[3];
+		GetClientEyePosition(teacher, eye);
+		GetClientEyeAngles(teacher, ang);
+		GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+		ScaleVector(fwd, 200.0);
+		AddVectors(eye, fwd, aim);
+		TR_TraceRayFilter(eye, aim, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceNoPlayers);
+		TR_GetEndPosition(aim);
+		int b = -1;
+		for (int i = 0; i < g_ln_boardCount; i++)
+			if (GetVectorDistance(g_ln_boardPos[i], pos) < 24.0) { b = i; break; }
+		if (b == -1)
+		{
+			if (g_ln_boardCount >= LEARN_MAX_BOARDS)
+				continue;
+			b = g_ln_boardCount++;
+		}
+		g_ln_boardStand[b] = me;
+		g_ln_boardAim[b] = aim;
+		g_ln_boardPos[b] = pos;
+		Learned_Save();
+		Note("Learned board %d from %N: stood at %.0f %.0f %.0f, board at %.0f %.0f %.0f", b, teacher, me[0], me[1], me[2], pos[0], pos[1], pos[2]);
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
 // Furniture the teacher moves
 
 int HammerID(int ent)
@@ -532,6 +610,10 @@ Action Timer_Watch(Handle timer)
 		if (GetClientButtons(client) & (IN_USE | IN_ATTACK2 | IN_ATTACK))
 			g_handsOn[client] = GetGameTime();
 
+		// Boards (as a survivor, with the hammer)
+		if (survivor)
+			WatchBoards(client);
+
 		// Furniture (as a survivor: barricades)
 		if (survivor)
 		{
@@ -651,8 +733,8 @@ Action Timer_Watch(Handle timer)
 
 Action Cmd_Status(int args)
 {
-	PrintToServer("[learn] %d hold spots, %d routes, %d furniture placements, %d entries; opened fire at %.0f on average (%d times), backed away at %.0f (%d times)",
-		g_ln_spotCount, g_ln_routeCount, g_ln_placeCount, g_ln_entryCount, g_ln_shootN ? g_ln_shootSum / float(g_ln_shootN) : 0.0, g_ln_shootN,
+	PrintToServer("[learn] %d hold spots, %d routes, %d furniture placements, %d boards, %d entries; opened fire at %.0f on average (%d times), backed away at %.0f (%d times)",
+		g_ln_spotCount, g_ln_routeCount, g_ln_placeCount, g_ln_boardCount, g_ln_entryCount, g_ln_shootN ? g_ln_shootSum / float(g_ln_shootN) : 0.0, g_ln_shootN,
 		g_ln_retreatN ? g_ln_retreatSum / float(g_ln_retreatN) : 0.0, g_ln_retreatN);
 	for (int i = 0; i < g_ln_spotCount; i++)
 		PrintToServer("  spot %d at %.0f %.0f %.0f held %.0f s%s, %d watch points", i, g_ln_spots[i][0], g_ln_spots[i][1], g_ln_spots[i][2],
@@ -667,6 +749,9 @@ Action Cmd_Status(int args)
 	for (int k = 0; k < g_ln_placeCount; k++)
 		PrintToServer("  %s furniture %d (hammer ID %d): %.0f %.0f %.0f -> %.0f %.0f %.0f", g_ln_placeTeam[k] == TEAM_ZOMBIES ? "zombie" : "survivor", k, g_ln_placeHammer[k],
 			g_ln_placeFrom[k][0], g_ln_placeFrom[k][1], g_ln_placeFrom[k][2], g_ln_placeTo[k][0], g_ln_placeTo[k][1], g_ln_placeTo[k][2]);
+	for (int b = 0; b < g_ln_boardCount; b++)
+		PrintToServer("  board %d: stand %.0f %.0f %.0f, board %.0f %.0f %.0f", b, g_ln_boardStand[b][0], g_ln_boardStand[b][1], g_ln_boardStand[b][2],
+			g_ln_boardPos[b][0], g_ln_boardPos[b][1], g_ln_boardPos[b][2]);
 	for (int e = 0; e < g_ln_entryCount; e++)
 		PrintToServer("  entry %d: %.0f %.0f %.0f -> %.0f %.0f %.0f, used %d times", e, g_ln_entryOut[e][0], g_ln_entryOut[e][1],
 			g_ln_entryOut[e][2], g_ln_entryIn[e][0], g_ln_entryIn[e][1], g_ln_entryIn[e][2], g_ln_entryUses[e]);
@@ -679,6 +764,7 @@ Action Cmd_Forget(int args)
 	g_ln_routeCount = 0;
 	g_ln_placeCount = 0;
 	g_ln_entryCount = 0;
+	g_ln_boardCount = 0;
 	g_ln_shootSum = 0.0; g_ln_retreatSum = 0.0;
 	g_ln_shootN = 0; g_ln_retreatN = 0;
 	Learned_Save();
@@ -724,6 +810,16 @@ Action Cmd_Drop(int args)
 		}
 		g_ln_placeCount--;
 	}
+	else if (StrEqual(what, "board") && i >= 0 && i < g_ln_boardCount)
+	{
+		for (int k = i; k < g_ln_boardCount - 1; k++)
+		{
+			g_ln_boardStand[k] = g_ln_boardStand[k + 1];
+			g_ln_boardAim[k] = g_ln_boardAim[k + 1];
+			g_ln_boardPos[k] = g_ln_boardPos[k + 1];
+		}
+		g_ln_boardCount--;
+	}
 	else if (StrEqual(what, "entry") && i >= 0 && i < g_ln_entryCount)
 	{
 		for (int k = i; k < g_ln_entryCount - 1; k++)
@@ -736,7 +832,7 @@ Action Cmd_Drop(int args)
 	}
 	else
 	{
-		PrintToServer("usage: sm_zps24learn_drop <spot|route|furniture|entry> <index> (see sm_zps24learn_status)");
+		PrintToServer("usage: sm_zps24learn_drop <spot|route|furniture|board|entry> <index> (see sm_zps24learn_status)");
 		return Plugin_Handled;
 	}
 	Learned_Save();

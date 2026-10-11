@@ -31,6 +31,7 @@ Set these in `~/zps24-server/zps/cfg/server.cfg` (loaded on every map) or change
 | `sm_zps24ai_holdout_radius` | 550 | Size of a house: doors and windows within this distance of the one nearest a bot's spawn belong to its home |
 | `sm_zps24ai_need_tool` | 0 | 1 = barricaders fetch the barricade hammer (unfinished); 0 = they shove furniture into doors |
 | `sm_zps24ai_furniture` | 1 | Barricaders without a hammer shove furniture into doors (bare hands, right click) |
+| `sm_zps24ai_builders` | 2 | Builders: survivor bots (in total, one per house at most) that drop their melee weapon for the barricade hammer and nail boards where you nailed them |
 | `sm_zps24ai_learned_style` | 1 | Fight at the distances learned from the main player (below) once there are enough samples, instead of `engage_range` and `safe_distance` |
 | `sm_zps24ai_debug` | 0 | Log survivor AI decisions to the server console |
 
@@ -54,6 +55,9 @@ The bots watch one player, the host (server admins), and copy them. Per map, sav
 - **Raw recording:** your movement and camera, 10 times a second (position, view angles,
   crouch, buttons, weapon, health), appended to `data/zps24_learn/rec/<map>.csv` for later
   analysis.
+- **Boards:** every board you nail with the hammer as a survivor: where you stood, where you
+  aimed, where the board went. Builder bots put the same boards up each round, and again when
+  zombies break them.
 - **Furniture:** which pieces you shove or carry, and where you leave them (into a door, across
   the stairs, anywhere). Each round, a house's furniture-pushers put the same pieces in the same
   places before barricading the doors. Pieces are recognized by their map ID, so it works
@@ -73,7 +77,7 @@ The bots pick up new lessons at the next round.
 | `sm_zps24learn_debug` | 1 | Log each lesson to the SourceMod log |
 | `sm_zps24learn_status` | | What has been learned on this map |
 | `sm_zps24learn_forget` | | Forget this map's lessons |
-| `sm_zps24learn_drop <spot\|route\|furniture\|entry> <n>` | | Forget one lesson (numbers from `sm_zps24learn_status`) |
+| `sm_zps24learn_drop <spot\|route\|furniture\|board\|entry> <n>` | | Forget one lesson (numbers from `sm_zps24learn_status`) |
 
 ### Per-map hold-outs (configs/zps24_maps.cfg)
 
@@ -155,6 +159,12 @@ Server console / RCON only.
 | `sm_zps24ai_status [all]` | Each home (the house a group of bots defends): bots, doors, windows, defend spots, barricaders. With `all`, every door and window too |
 | `sm_zps24ai_bots` | What each survivor bot is doing right now, how long it has been stuck, its weapon and NavBot task |
 | `sm_zps24ai_doors` | Every door on the map with its headroom on both sides, and whether it counts as an outside door |
+
+## Test server
+
+`scripts/zps24-test-server.sh start [map] [slots] | stop | cmd "..." | log` runs a second
+instance from the same install on port 27035 (its own log, tracked by PID), for testing or
+generating nav meshes while someone plays on the main server.
 
 ## Nav mesh tools (zps24_navdebug)
 

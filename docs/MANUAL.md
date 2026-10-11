@@ -1632,6 +1632,31 @@ pinned upstairs climbed the church house ladder and finished at the top (z 72).
 **Lessons.** "Stuck" needs a cause: blocked by *what*, and in *which direction*? And when one
 mechanism (stair routes) works, reuse it for the next problem of the same shape (ladders).
 
+### 11.11 Builders: the hammer, learned from the player
+
+Why the hammer was hard (weight limit, no direct equip, the fit check that only passes for an
+aim held through the whole animation, windows the bots were told to avoid, no
+`CanAttachBarricade` on Windows) is explained in the docs; the way around most of it is the
+player:
+
+- **Builders.** A few survivor bots (`sm_zps24ai_builders`, 2 in total, one per house) drop
+  their melee weapons and take the hammer: one lying within 600 units, else a fresh
+  `weapon_barricade`, put in front of their face and taken with the real E key. Dropping the
+  melee weapons is enough for ZPS 2.4's weight limit (tested: builder with an MP5 and the
+  hammer); if the hammer still won't come after 3 offers, the main gun goes too.
+- **Lessons.** The learner watches for new boards (props with a `barricades/barricade_` model).
+  A new one within 220 units of the teacher, who holds the hammer and swung in the last 3 s, is
+  theirs: it records where they stood, where their view hit and where the board went. Boards
+  that bots nail are only marked as seen.
+- **Replay.** A builder takes the nearest of the teacher's boards in its house that isn't up
+  (never built this round, or broken by zombies), walks to where the teacher stood, switches to
+  the hammer, aims where the teacher aimed and holds attack for the whole animation, then
+  checks a board appeared there. Three misses and that board is skipped for the round; when all
+  are up, back to the guns. Every 10 s it checks again, so broken boards get rebuilt.
+
+No fit check is needed: the teacher's spot already fitted. So this works on the Windows build
+too, where `CanAttachBarricade` doesn't exist.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
