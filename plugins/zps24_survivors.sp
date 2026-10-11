@@ -91,6 +91,12 @@ int   g_openingClaim[MAX_OPENINGS];      // client working on it (0 = nobody)
 bool  g_openingDone[MAX_OPENINGS];
 float g_roundStart;
 float g_badHoldout[8][3];                // homes we were overrun at this round
+// Per-map hold-out (configs/zps24_maps.cfg) for maps where the best place isn't the spawn building.
+bool  g_mapHome;
+float g_mapHomePos[3];
+float g_mapRadius;                       // 0 = sm_zps24ai_holdout_radius
+float g_mapGround;                       // street level heights are measured from
+bool  g_mapPreferUp;
 int   g_badHoldoutCount;
 
 // Per-bot state
@@ -184,8 +190,34 @@ public void OnPluginStart()
 	ResetRound();
 }
 
+void LoadMapConfig()
+{
+	g_mapHome = false;
+	g_mapRadius = 0.0;
+	g_mapPreferUp = false;
+	char path[PLATFORM_MAX_PATH], map[64];
+	BuildPath(Path_SM, path, sizeof(path), "configs/zps24_maps.cfg");
+	GetCurrentMap(map, sizeof(map));
+	KeyValues kv = new KeyValues("Maps");
+	if (kv.ImportFromFile(path) && kv.JumpToKey(map))
+	{
+		float none[3] = { 999999.0, 0.0, 0.0 };
+		kv.GetVector("home", g_mapHomePos, none);
+		g_mapHome = g_mapHomePos[0] != 999999.0;
+		g_mapRadius = kv.GetFloat("radius", 0.0);
+		g_mapGround = kv.GetFloat("ground", g_mapHomePos[2]);
+		char prefer[16];
+		kv.GetString("prefer", prefer, sizeof(prefer), "both");
+		g_mapPreferUp = StrEqual(prefer, "up");
+		if (g_mapHome)
+			LogMessage("%s: survivors hold out at %.0f %.0f %.0f (from configs/zps24_maps.cfg)", map, g_mapHomePos[0], g_mapHomePos[1], g_mapHomePos[2]);
+	}
+	delete kv;
+}
+
 public void OnMapStart()
 {
+	LoadMapConfig();
 	Stairs_OnMapStart();          // hand-made stair routes, plus what the bots learned from you
 	ResetRound();
 	CreateTimer(1.0, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
@@ -455,6 +487,8 @@ void AssignHome(int client)
 		from = g_spawnPos[client];
 	else
 		GetClientAbsOrigin(client, from);
+	if (g_mapHome && !IsBadHoldout(g_mapHomePos))
+		from = g_mapHomePos;               // this map's hold-out, wherever they spawned
 	float r = g_radius.FloatValue;
 
 	// A home we already have that this spot is in or right next to.
@@ -597,37 +631,55 @@ bool NearWindow(int h, const float pos[3], float dist)
 // shoot whatever climbs in. Each defending bot gets its own spot.
 int BuildDefendSpots(int h, Address start)
 {
-	NavBotNavAreaCollector c = new NavBotNavAreaCollector();
-	c.SetSearchStartArea(start);
-	c.TravelLimit = g_radius.FloatValue * 1.6;
-	c.SearchLadder = true;
-	c.Execute();
-	NavBotNavAreaVector v = c.GetCollectedAreas();
-	delete c;
-
-	int n = v.Size;
+	// Walkable areas around the home. Bots defend from inside buildings, so if the search finds
+	// few roofed areas (a home picked from a street spawn, like zps_cinema's), widen it until it
+	// reaches the building.
 	static float scores[512], centers[512][3];
-	if (n > 512) n = 512;
-	float floorZ = 999999.0;          // the building's ground floor = lowest collected area
-	for (int i = 0; i < n; i++)
+	static bool roofed[512];
+	NavBotNavAreaVector v = null;
+	int n = 0, indoor = 0;
+	float limit = (g_mapHome && g_mapRadius > 0.0 ? g_mapRadius : g_radius.FloatValue) * 1.6;
+	for (int pass = 0; pass < 3; pass++)
 	{
-		NavBotNavArea.GetCenter(v.At(i), centers[i]);
-		if (centers[i][2] < floorZ) floorZ = centers[i][2];
+		if (v != null) delete v;
+		NavBotNavAreaCollector c = new NavBotNavAreaCollector();
+		c.SetSearchStartArea(start);
+		c.TravelLimit = limit;
+		c.SearchLadder = true;
+		c.Execute();
+		v = c.GetCollectedAreas();
+		delete c;
+		n = v.Size > 512 ? 512 : v.Size;
+		indoor = 0;
+		for (int i = 0; i < n; i++)
+		{
+			NavBotNavArea.GetCenter(v.At(i), centers[i]);
+			roofed[i] = SpaceAbove(centers[i]) < 400.0;
+			if (roofed[i]) indoor++;
+		}
+		if (indoor >= 16)
+			break;
+		limit *= 1.8;
 	}
+
+	// Heights are measured from the home's own ground level: upper floors, roofs and balconies
+	// above it, and basements below it, are both good places to fight from.
+	float floorZ = g_mapHome && GetVectorDistance(g_homePos[h], g_mapHomePos) < 600.0 ? g_mapGround : g_homePos[h][2];
 	for (int i = 0; i < n; i++)
 	{
 		Address a = v.At(i);
-		float height = centers[i][2] - floorZ;
+		float dz = centers[i][2] - floorZ;
+		float height = g_mapPreferUp ? dz : FloatAbs(dz);   // "up": basements don't count
 		int neighbours = 0;
 		for (int d = 0; d < 4; d++)
 			neighbours += NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
-		// Elevation dominates; few neighbours (a corner) breaks ties; stay close to the building;
-		// keep well back from windows; stay indoors.
-		scores[i] = (height >= g_upperHeight.FloatValue ? 1000.0 + height : 0.0)
+		// Off the ground floor (up or down) dominates; few neighbours (a corner) breaks ties; stay
+		// fairly close; never next to a window; indoors only, unless there's hardly any indoors.
+		scores[i] = (height >= g_upperHeight.FloatValue ? 1000.0 + (height > 400.0 ? 400.0 : height) : 0.0)
 			+ (neighbours <= 2 ? 200.0 : 0.0)
-			- GetVectorDistance(centers[i], g_homePos[h]) * 0.2
+			- GetVectorDistance(centers[i], g_homePos[h]) * 0.1
 			- (NearWindow(h, centers[i], 150.0) ? 5000.0 : 0.0)
-			- (SpaceAbove(centers[i]) > 400.0 ? 600.0 : 0.0);
+			- (roofed[i] ? 0.0 : (indoor >= 6 ? 5000.0 : 600.0));
 	}
 	delete v;
 
@@ -680,8 +732,8 @@ int BuildDefendSpots(int h, Address start)
 		used[best] = true;
 		g_defendPos[h][g_defendCount[h]] = centers[best];
 		g_defendCount[h]++;
-		if (centers[best][2] - floorZ >= g_upperHeight.FloatValue)
-			g_upperCount[h]++;          // spots are picked best-first, so upper ones come first
+		if ((g_mapPreferUp ? centers[best][2] - floorZ : FloatAbs(centers[best][2] - floorZ)) >= g_upperHeight.FloatValue)
+			g_upperCount[h]++;          // spots are picked best-first, so upstairs/basement ones come first
 	}
 	Debug("Home %d: %d defend spots (%d learned from the main player) from %d areas (best %.0f units above the ground floor)", h, g_defendCount[h], learned, n, g_defendCount[h] ? g_defendPos[h][0][2] - floorZ : 0.0);
 	return n;
@@ -1932,8 +1984,8 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 			// Upstairs whenever the building has an upper floor, roof or balcony.
 			int top = g_upperCount[h] > 0 ? g_upperCount[h] : g_defendCount[h];
 			if (top < 4) top = g_defendCount[h] < 4 ? g_defendCount[h] : 4;   // don't all pile onto one spot
-			if (top > 8) top = 8;
-			g_defendIdx[client] = GetRandomInt(0, top - 1);
+			if (top > 16) top = 16;
+			g_defendIdx[client] = PickFreeSpot(client, h, top);
 			g_defendSwitch[client] = GetGameTime() + GetRandomFloat(25.0, 45.0);
 		}
 		spot = g_defendPos[h][g_defendIdx[client] % g_defendCount[h]];
@@ -1970,6 +2022,22 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 	strcopy(g_state[client], sizeof(g_state[]), "holding defend spot");
 	return Hold(client);
+}
+
+// A random one of the home's best `top` spots that no other bot of the home holds, so they spread
+// out and hide in different places; if all are taken, any of them.
+int PickFreeSpot(int client, int h, int top)
+{
+	int free[MAX_DEFEND], n = 0;
+	for (int i = 0; i < top; i++)
+	{
+		bool taken = false;
+		for (int o = 1; o <= MaxClients && !taken; o++)
+			taken = o != client && g_home[o] == h && g_defendIdx[o] % g_defendCount[h] == i && IsClientInGame(o) && IsPlayerAlive(o);
+		if (!taken)
+			free[n++] = i;
+	}
+	return n > 0 ? free[GetRandomInt(0, n - 1)] : GetRandomInt(0, top - 1);
 }
 
 // Bots that haven't moved for a second next to a closed door get it opened, exactly what E does.

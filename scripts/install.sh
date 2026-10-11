@@ -87,6 +87,7 @@ for p in zps24_compat zps24_botprobe zps24_navdebug zps24_ammorespawn zps24_lear
 	"$SMD/scripting/spcomp" -i"$SPCOMP_INC" -i"$REPO/plugins" "$REPO/plugins/$p.sp" \
 		-o "$SMD/plugins/$p.smx" >/dev/null
 done
+cp -n "$REPO/configs/zps24_maps.cfg" "$SMD/configs/" 2>/dev/null || true   # per-map hold-outs
 # Nav meshes for the stock and bot maps (generated with sm_nav_generate); yours are kept.
 mkdir -p "$SMD/data/navbot/zps"
 cp -n "$REPO"/data/navbot/zps/*.smnav "$SMD/data/navbot/zps/" 2>/dev/null || true

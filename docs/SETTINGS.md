@@ -68,6 +68,23 @@ The bots pick up new lessons at the next round.
 | `sm_zps24learn_forget` | | Forget this map's lessons |
 | `sm_zps24learn_drop <spot\|route\|furniture\|entry> <n>` | | Forget one lesson (numbers from `sm_zps24learn_status`) |
 
+### Per-map hold-outs (configs/zps24_maps.cfg)
+
+On most maps survivor bots defend the building they spawn in. Where the best place to hold is
+somewhere else, `addons/sourcemod/configs/zps24_maps.cfg` sends every survivor bot there:
+
+| Key | What it does |
+|---|---|
+| `home` | Where every survivor bot holds out (x y z, inside the building) |
+| `radius` | How far around it they look for defend spots (default `sm_zps24ai_holdout_radius`) |
+| `prefer` | `up` = upper floors only; `both` = upper floors and basements (the default) |
+| `ground` | The ground-floor height "upper" and "basement" are measured from |
+
+Included: `zps_cinema` (the cinema's upper floors; survivors spawn on the street outside).
+
+Defend spots are always indoors when the area has enough roofed ground, prefer floors above (and
+by default below) ground level, and bots of the same house each take a different spot.
+
 ## Zombie bots (zps24_zombies)
 
 | Setting | Default | What it does |

@@ -1561,6 +1561,33 @@ The request: bots on the cinema map, in the rotation, then meshes for all the ot
 
 ---
 
+### 11.9 zps_cinema: hold the cinema, not the street
+
+"All survivors stay outside when they're supposed to go inside, hide in different spots and
+shoot zombies from the upper floors and basements." The nav mesh was fine (the survivor spawn
+reached 97% of it, basements and upper floors included). The survivor AI's choices weren't:
+
+- **Outdoor spots were only penalized a little**, so with a street spawn and few recognized
+  doors and windows, the "house" was the street. Now defend spots must be roofed whenever the
+  area has 6+ roofed areas, and the search widens (x1.8, twice) until it finds at least 16.
+- **Only "upstairs" counted, measured from the lowest area.** With basements around, the
+  lowest area *is* the basement. Heights are now measured from the home's ground level, and
+  basements count as good spots too.
+- **The cinema is 3,000 units from the spawn.** Every first-floor area cluster sat far west
+  (x -2900 to -1900), next to where the player's learned route went up to z 152; "defend the
+  house you spawned in" can never pick it. The player confirmed: the upper floors are *the*
+  hiding place. So a per-map config, `configs/zps24_maps.cfg`, can name a hold-out: every
+  survivor bot's home becomes the cinema, upper floors only (zombies spawn at basement level
+  right next to it), heights from street level.
+- **"Hide in different spots":** bots picked randomly among the best spots and three ended up
+  on one. Now each takes a spot no other bot of its home holds.
+
+Result: all survivor bots crossed to the cinema and spread over its upper floor (z 48-64,
+about 150 above the street) within a minute.
+
+**Lessons.** Measure the nav mesh before blaming it. A general rule ("defend where you spawn")
+needs an escape hatch for maps that are designed differently, and the player knows the map.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
