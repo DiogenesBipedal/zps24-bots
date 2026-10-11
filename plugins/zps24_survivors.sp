@@ -20,6 +20,9 @@
 #include <sourcemod>
 #include <sdktools>
 #include <navbot>
+#undef REQUIRE_EXTENSIONS
+#include <sdkhooks>                       // optional: SDKHooks_DropWeapon for melee weapons "dropweapon" won't drop
+#define REQUIRE_EXTENSIONS
 #include "include/zps24_unstick.inc"
 #include "include/zps24_stairs.inc"
 
@@ -44,6 +47,9 @@ ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOp
 bool  g_builder[MAXPLAYERS + 1];
 int   g_buildLesson[MAXPLAYERS + 1] = { -1, ... };
 int   g_buildTries[MAXPLAYERS + 1];
+int   g_dropTries[MAXPLAYERS + 1];
+int   g_breakDoor[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // basement door being smashed
+float g_breakUntil[MAXPLAYERS + 1];         // "dropweapon" sent for the melee weapon in hand
 int   g_hammerFails[MAXPLAYERS + 1];       // offered the hammer and still don't have it
 int   g_spawnedHammer[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 float g_buildRecheck[MAXPLAYERS + 1];
@@ -934,6 +940,16 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 		}
 	}
 
+	// Basement doors: the one kind of door survivors break, with a melee weapon. A door-shaped
+	// func_breakable below the ground floor of the bot's home (church: its basement doors).
+	if (StrEqual(cls, "func_breakable") && GetGameTime() > g_breakUntil[client] + 2.0 && IsBasementDoor(client, entity))
+	{
+		g_breakDoor[client] = EntIndexToEntRef(entity);
+		g_breakUntil[client] = GetGameTime() + 20.0;
+		Debug("%N breaks the basement door %d", client, entity);
+		return Plugin_Handled;
+	}
+
 	if (StrContains(cls, "breakable") != -1 || StrContains(cls, "prop_physics") != -1 || StrContains(cls, "physbox") != -1
 		|| StrContains(cls, "barricade") != -1)
 		return Plugin_Handled;   // walk around (or shove) it instead of smashing it
@@ -1335,6 +1351,61 @@ bool DoPlace(int client, NavBot bot, float moveGoal[3])
 	return false;
 }
 
+// A door-shaped func_breakable (thin, at least door height) whose middle is well below the
+// ground floor of the bot's home: a basement door.
+bool IsBasementDoor(int client, int ent)
+{
+	if (!HasEntProp(ent, Prop_Send, "m_vecMins") || GetEntProp(ent, Prop_Data, "m_iHealth") <= 0)
+		return false;
+	float mins[3], maxs[3], c[3];
+	GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+	GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+	EntityCenter(ent, c);
+	float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1], sz = maxs[2] - mins[2];
+	if ((sx < sy ? sx : sy) > 16.0 || sz < 70.0)
+		return false;
+	int h = g_home[client];
+	float ground = h >= 0 ? (g_mapHome && GetVectorDistance(g_homePos[h], g_mapHomePos) < 600.0 ? g_mapGround : g_homePos[h][2]) : 0.0;
+	float me[3];
+	GetClientAbsOrigin(client, me);
+	if (h < 0) ground = me[2];
+	return c[2] < ground - 60.0;
+}
+
+// Smash the basement door in the way with a melee weapon (bare hands if none), until it breaks.
+// Returns true while busy.
+bool BreakBasementDoor(int client, NavBot bot)
+{
+	int door = EntRefToEntIndex(g_breakDoor[client]);
+	if (door == INVALID_ENT_REFERENCE || GetGameTime() > g_breakUntil[client] || GetEntProp(door, Prop_Data, "m_iHealth") <= 0)
+	{
+		g_breakDoor[client] = INVALID_ENT_REFERENCE;
+		return false;
+	}
+	int melee = MeleeWeapon(client);
+	int weapon = melee != -1 ? melee : FindOwnedWeapon(client, "weapon_emptyhand");
+	if (weapon != -1 && GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != weapon && GetGameTime() >= g_nextUse[client])
+	{
+		char cls[64], cmd[80];
+		GetEntityClassname(weapon, cls, sizeof(cls));
+		Format(cmd, sizeof(cmd), "use %s", cls);
+		bot.DelayedFakeClientCommand(cmd);
+		g_nextUse[client] = GetGameTime() + 0.5;
+		g_handsUntil[client] = GetGameTime() + 2.0;   // HoldBestGun: not now
+	}
+	g_handsUntil[client] = GetGameTime() + 2.0;
+	float c[3], eye[3];
+	EntityCenter(door, c);
+	GetClientEyePosition(client, eye);
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Breaking the basement door");
+	if (GetVectorDistance(eye, c) > 70.0)
+		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
+	else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.2);
+	return true;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Builders: nail boards where the main player nailed them
 
@@ -1402,12 +1473,21 @@ bool GetHammer(int client, NavBot bot, float moveGoal[3])
 		}
 		else
 		{
-			bot.DelayedFakeClientCommand("dropweapon");
-			Debug("%N (builder) drops its melee weapon for the hammer", client);
+			// Hand it in: drop it through the game's own Weapon_Drop (keeps ZPS's weight
+			// bookkeeping right) and remove it, or the bot standing on it picks it right back up.
+			char cls[64];
+			GetEntityClassname(melee, cls, sizeof(cls));
+			if (GetFeatureStatus(FeatureType_Native, "SDKHooks_DropWeapon") == FeatureStatus_Available)
+				SDKHooks_DropWeapon(client, melee);
+			else
+				RemovePlayerItem(client, melee);
+			AcceptEntityInput(melee, "Kill");
+			Debug("%N (builder) hands in %s for the hammer", client, cls);
 		}
 		g_nextUse[client] = GetGameTime() + 0.6;
 		return false;
 	}
+	g_dropTries[client] = 0;
 	if (g_hammerFails[client] >= 3 && ShedWeight(client, bot))
 		return false;                        // still too heavy: drop the main gun as well
 
@@ -2146,6 +2226,14 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		return MoveTo(client, moveGoal);
 	}
 
+	// A basement door in the way: break it (melee).
+	if (BreakBasementDoor(client, bot))
+	{
+		strcopy(g_state[client], sizeof(g_state[]), "breaking the basement door");
+		g_us_wantMove[client] = false;
+		return Plugin_Continue;
+	}
+
 	// Furniture in the way (see OnNavBotObstacleOnPath): shove it aside, a bit off our line so it
 	// ends up beside the path rather than further along it.
 	if (GetGameTime() < g_shoveUntil[client])
@@ -2408,7 +2496,7 @@ Action Timer_Think(Handle timer)
 				Debug("%N builds the main player's boards", client);
 			}
 		}
-		if (g_job[client] == JOB_NONE && CountBarricaders(g_home[client]) < g_barricaders.IntValue)
+		if (g_job[client] == JOB_NONE && !g_builder[client] && CountBarricaders(g_home[client]) < g_barricaders.IntValue)
 		{
 			int k = ClaimPlacement(client);
 			if (k != -1)
@@ -2420,7 +2508,7 @@ Action Timer_Think(Handle timer)
 				Debug("%N copies the main player's furniture placement %d", client, k);
 			}
 		}
-		if (g_job[client] == JOB_NONE && CountBarricaders(g_home[client]) < g_barricaders.IntValue)
+		if (g_job[client] == JOB_NONE && !g_builder[client] && CountBarricaders(g_home[client]) < g_barricaders.IntValue)
 		{
 			int o = ClaimOpening(client);
 			if (o != -1)

@@ -1657,6 +1657,30 @@ player:
 No fit check is needed: the teacher's spot already fitted. So this works on the Windows build
 too, where `CanAttachBarricade` doesn't exist.
 
+**Handing in the melee weapon.** The first try used the `dropweapon` command. It worked, but the
+bot was standing on the weapon it had just dropped and picked it straight back up: an endless
+"drops its melee weapon" loop. Now the builder switches to the melee weapon, drops it through the
+game's own `Weapon_Drop` (SDKHooks), so ZPS's weight bookkeeping stays right, and then removes
+it. It's a real exchange: melee out, hammer in. Builders also skip the furniture and
+barricade-an-opening jobs, so they don't get pulled away from their boards.
+
+### 11.12 Basement doors: the one door survivors break
+
+Survivors never break doors, windows or barricades (11.1). The church's basement doors are the
+exception: they are `func_breakable`s, the nav path into the basement runs through them, and a
+closed one leaves the bot standing in front of it forever.
+
+When NavBot reports a `func_breakable` on the path (`OnNavBotObstacleOnPath`), the bot checks
+whether it's a basement door:
+
+- door-shaped: thinner than 16 units and at least 70 tall;
+- its middle sits more than 60 units below the ground floor of the bot's home.
+
+If so, the bot switches to its melee weapon (bare hands if it has none), walks up to the door,
+aims at its middle and left-clicks until the door breaks (state "breaking the basement door",
+20 s at most). Then it carries on down. Every time a bot goes there, it does the same. Doors at
+ground level and above are still never touched.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
