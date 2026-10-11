@@ -148,7 +148,6 @@ Every setting and command is in [docs/SETTINGS.md](docs/SETTINGS.md).
 
 - Survivor bots barricade with furniture only. The barricade hammer is off: the game's weight
   limit stops armed bots from carrying it.
-- Bots can't climb the church map's ladders.
 - Bots occasionally post random text in chat.
 - The server sometimes crashes when it shuts down. It doesn't affect play.
 

@@ -17,8 +17,7 @@ Where the project is (v0.1) and what's next. Nothing here has a date.
 - **zpo_aquatica has no nav mesh.** Generation finds no walkable ground from its spawns: the
   ground tracer looks through entities it treats as walkable, and this map's start areas seem to
   stand on such entities. Needs NavBot's generation filter looked at.
-- **Church ladders.** The nav mesh has ladders (from `info_ladder`), but bots fail the climb
-  itself. NavBot's ladder movement needs looking at for HL2-style ladders.
+
 - **Chat gibberish.** Some bots occasionally put random text in chat without going through the
   `say` command. `ZPS24_GDB=1` mode sets a `Host_Say` breakpoint to catch where it comes from.
 - **Crash on shutdown.** Harmless, but noisy.

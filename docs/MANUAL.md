@@ -1600,6 +1600,38 @@ about 150 above the street) within a minute.
 **Lessons.** Measure the nav mesh before blaming it. A general rule ("defend where you spawn")
 needs an escape hatch for maps that are designed differently, and the player knows the map.
 
+### 11.10 Zombies at the tower door, and ladders
+
+**"Zombies can't reach me on the second floor again"** (the church tower). The tower doorway was
+open (a horizontal trace went straight through) and its nav area connected, yet over a minute no
+zombie got inside. The log said why: 17 times "is stuck, smashing func_breakable". Twenty zombies
+funnel into a 70-unit doorway and block each other; the ones at the back stop moving, the stuck
+check fires after 1.5 s, and it smashed *the nearest breakable in any direction*: the tower's
+closed side door (3000 hp) next to the open doorway. Their hits chipped it, so they never gave up.
+Fixes:
+- an obstacle only counts if it's **ahead**: in the direction the zombie faces (bots face where
+  they walk) or towards its target;
+- **a zombie with another zombie right in front of it is queuing, not stuck**: no smashing, no
+  unstick detours, it keeps pushing.
+
+**"Zombies can't climb the ladder in my house."** NavBot's own ladder movement never worked on
+2.4's walk-in ladders (`info_ladder`; "you don't need E", as the player put it), and the nav mesh
+had no ladder links there anyway. So ladders became routes, like the tower stairs (11.5): at map
+start every `info_ladder` (its `mins`/`maxs` are in the datamap) gives four points: floor in front,
+the foot, the top, and a step off onto the floor above, found by looking for nav areas on each side
+at the bottom and top heights. On the climb the bot faces the ladder, looks the way it's going and
+walks forward into it. Two details of the route code had to change for this:
+- a point counts as reached only when it's also reached in **height** (foot and top have the same
+  x and y, so the climb was skipped);
+- progress is measured in **3D** (climbing doesn't change the horizontal distance, so the route
+  gave up after 3 s).
+
+Ladder routes are always used (learned routes only when stuck). Tested: zombies chasing a survivor
+pinned upstairs climbed the church house ladder and finished at the top (z 72).
+
+**Lessons.** "Stuck" needs a cause: blocked by *what*, and in *which direction*? And when one
+mechanism (stair routes) works, reuse it for the next problem of the same shape (ladders).
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

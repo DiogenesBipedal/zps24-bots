@@ -944,6 +944,52 @@ float CenterOf(int ent, float out[3])
 }
 
 // Nearest smashable obstacle or piece of furniture within reach of a stuck zombie.
+// Directions a zombie is trying to go: where it faces (bots face where they walk) and towards
+// its target. An obstacle only counts if it lies ahead in one of them.
+bool IsAhead(int client, const float me[3], const float at[3])
+{
+	float to[3], fwd[3], ang[3];
+	SubtractVectors(at, me, to);
+	to[2] = 0.0;
+	if (GetVectorLength(to) < 1.0)
+		return true;
+	NormalizeVector(to, to);
+	GetClientEyeAngles(client, ang);
+	ang[0] = 0.0;
+	GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+	if (GetVectorDotProduct(to, fwd) > 0.5)
+		return true;
+	if (IsLiveSurvivor(g_target[client]))
+	{
+		float t[3], dir[3];
+		GetClientAbsOrigin(g_target[client], t);
+		SubtractVectors(t, me, dir);
+		dir[2] = 0.0;
+		NormalizeVector(dir, dir);
+		return GetVectorDotProduct(to, dir) > 0.5;
+	}
+	return false;
+}
+
+// Another zombie right in front: we're queuing in a crowd (a doorway, a staircase), not stuck.
+bool InCrowd(int client)
+{
+	float me[3], o[3];
+	GetClientAbsOrigin(client, me);
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (i == client || !IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+			continue;
+		GetClientAbsOrigin(i, o);
+		if (GetVectorDistance(me, o) < 56.0 && IsAhead(client, me, o))
+			return true;
+	}
+	return false;
+}
+
+// The smashable obstacle or piece of furniture in the way of a stuck zombie: within reach and
+// ahead of it. (Picking the nearest one in any direction had zombies queuing at the church
+// tower's open doorway smash the 3000 hp side door next to it instead.)
 int FindObstacle(int client)
 {
 	float me[3], c[3];
@@ -957,7 +1003,7 @@ int FindObstacle(int client)
 			continue;
 		CenterOf(ent, c);
 		float d = GetVectorDistance(me, c);
-		if (d < bestDist) { bestDist = d; best = ent; }
+		if (d < bestDist && IsAhead(client, me, c)) { bestDist = d; best = ent; }
 	}
 	return best;
 }
@@ -1704,6 +1750,8 @@ Action Timer_Think(Handle timer)
 		}
 		NavBot bot = NavBotManager.GetNavBotByIndex(client);
 		Unstick_Track(client, bot);
+		if (InCrowd(client))
+			g_us_movedAt[client] = GetGameTime();   // queuing, not stuck: no detours or teleports
 
 		// Stuck detection: barely moved for 1.5 s while not already smashing something.
 		float pos[3];
@@ -1711,7 +1759,9 @@ Action Timer_Think(Handle timer)
 		if (GetVectorDistance(pos, g_lastPos[client]) > 24.0)
 			g_stuckSince[client] = GetGameTime();
 		g_lastPos[client] = pos;
-		if (GetGameTime() - g_stuckSince[client] > 1.5 && EntRefToEntIndex(g_smash[client]) == INVALID_ENT_REFERENCE)
+		if (GetGameTime() - g_stuckSince[client] > 1.5 && EntRefToEntIndex(g_smash[client]) == INVALID_ENT_REFERENCE && InCrowd(client))
+			g_stuckSince[client] = GetGameTime();   // queuing behind other zombies: keep pushing, don't smash things
+		else if (GetGameTime() - g_stuckSince[client] > 1.5 && EntRefToEntIndex(g_smash[client]) == INVALID_ENT_REFERENCE)
 		{
 			int obstacle = FindObstacle(client);
 			if (obstacle != -1 && IsFurniture(obstacle))
