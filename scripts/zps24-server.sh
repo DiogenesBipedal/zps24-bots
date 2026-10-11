@@ -22,6 +22,12 @@ HERE="$(dirname "$(readlink -f "$0")")"
 export ZPS24_RCON_PW_FILE="$CONF/rcon.pw"
 LANIP="${ZPS24_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')}"
 export ZPS24_RCON_HOST="$LANIP"
+# The port the server actually got. If something else holds 27015 when it starts (often the ZPS
+# game itself, when it was started first), Source quietly takes the next free port.
+server_port() { sed -n 's/.*ports \([0-9]*\) SV.*/\1/p' "$LOG" 2>/dev/null | tail -1; }
+PORT="$(server_port)"; PORT="${PORT:-27015}"
+export ZPS24_RCON_PORT="$PORT"
+join_addr() { local p; p="$(server_port)"; [ -n "$p" ] && [ "$p" != 27015 ] && echo "$LANIP:$p" || echo "$LANIP"; }
 
 rcon() { python3 "$HERE/rcon.py" "$@"; }
 running() { pgrep -x srcds_i486 >/dev/null; }
@@ -64,8 +70,14 @@ GDB
 		LD_LIBRARY_PATH="$SERVER/bin:$SERVER" setsid ./srcds_i486 "$@" < /dev/null > "$LOG" 2>&1 &
 	fi
 	printf 'Starting'
-	for i in $(seq 60); do sleep 2; printf '.'; rcon "echo ready" 2>/dev/null | grep -q ready && break; done
-	echo; running && echo "Server up on $map. In ZPS 2.4 open the console and type: connect $LANIP" || { echo "Server failed; see $LOG"; exit 1; }
+	for i in $(seq 60); do
+		sleep 2; printf '.'
+		p="$(server_port)"; [ -n "$p" ] && export ZPS24_RCON_PORT="$p"
+		rcon "echo ready" 2>/dev/null | grep -q ready && break
+	done
+	echo; running || { echo "Server failed; see $LOG"; exit 1; }
+	echo "Server up on $map. In ZPS 2.4 open the console and type: connect $(join_addr)"
+	[ "$(server_port)" != 27015 ] && echo "(Port 27015 was taken, probably by the ZPS game: start the server before the game to keep the plain address.)" || true
 	;;
 stop)
 	running || { echo "Not running."; exit 0; }
