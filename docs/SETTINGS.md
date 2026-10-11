@@ -148,9 +148,18 @@ somewhere on a map.
 
 ## Map rotation
 
-`server.cfg` points `mapcyclefile` at `mapcycle_bots.txt` (cabin and church) and sets
-`mp_maxrounds 2`, so the map changes every 2 rounds. Add maps to `zps/mapcycle_bots.txt` and run
-`zps24-server.sh navgen` once on each new map.
+`server.cfg` points `mapcyclefile` at `mapcycle_bots.txt` (cabin, church and cinema) and sets
+`mp_maxrounds 2`, so the map changes every 2 rounds. To add a map, put it in
+`zps/mapcycle_bots.txt`.
+
+## Nav meshes
+
+The repo ships nav meshes (`data/navbot/zps/`) for all 29 stock and bot maps except
+`zpo_aquatica`; the installer copies them without overwriting your own. For any other map, load
+it and run `zps24-server.sh navgen` (or `sv_cheats 1` + `sm_nav_generate` in the console). It
+works on an empty server too: NavBot is patched to keep generating while the server isn't
+simulating. Objective maps (`zpo_`) are built in sections that open as objectives are completed,
+so not every area is reachable from the start; that's expected.
 
 ## Environment variables for the scripts
 

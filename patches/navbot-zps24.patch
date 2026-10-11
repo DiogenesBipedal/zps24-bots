@@ -109,7 +109,7 @@ index b49b90d..1be39ab 100644
  		m_updatecallback->PushArray(arrgoal.data(), 3, SM_PARAM_COPYBACK);
  		m_updatecallback->PushCellByRef(&routetype);
 diff --git a/extension/extension.cpp b/extension/extension.cpp
-index 5ce290b..491af0b 100644
+index 5ce290b..fc307db 100644
 --- a/extension/extension.cpp
 +++ b/extension/extension.cpp
 @@ -126,6 +126,7 @@ static ConVar cvar_draw_player_move("sm_navbot_debug_draw_player_move", "0", FCV
@@ -175,7 +175,23 @@ index 5ce290b..491af0b 100644
  
  	gpGlobals = ismm->GetCGlobals();
  
-@@ -698,3 +724,25 @@ void NavBotExt::Hook_ClientCommandKeyValues(edict_t* pEntity, KeyValues* pKeyVal
+@@ -591,8 +617,15 @@ void NavBotExt::Hook_GameFrame(bool simulating)
+ 	VPROF_BUDGET("NavBotExt::Hook_GameFrame", "NavBot");
+ #endif // EXT_VPROF_ENABLED
+ 
++	// Nav mesh generation must keep going on an empty dedicated server: generating kicks the bots,
++	// and with nobody connected the server stops simulating. (ZPS 2.4: sm_nav_generate over RCON.)
+ 	if (!simulating)
+ 	{
++		if (TheNavMesh && TheNavMesh->IsGenerating())
++		{
++			TheNavMesh->Update();
++		}
++
+ 		RETURN_META(MRES_IGNORED);
+ 	}
+ 
+@@ -698,3 +731,25 @@ void NavBotExt::Hook_ClientCommandKeyValues(edict_t* pEntity, KeyValues* pKeyVal
  }
  #endif // EXT_DEBUG
  

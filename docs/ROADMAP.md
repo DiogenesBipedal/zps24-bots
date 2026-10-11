@@ -14,6 +14,9 @@ Where the project is (v0.1) and what's next. Nothing here has a date.
   survivors can't use the tower's upper floors yet. Other maps with steep stairs need their own
   routes. Lowering `NavGen_StepSize` is not a fix: at 12.5 the church mesh came out in thousands
   of disconnected pieces.
+- **zpo_aquatica has no nav mesh.** Generation finds no walkable ground from its spawns: the
+  ground tracer looks through entities it treats as walkable, and this map's start areas seem to
+  stand on such entities. Needs NavBot's generation filter looked at.
 - **Church ladders.** The nav mesh has ladders (from `info_ladder`), but bots fail the climb
   itself. NavBot's ladder movement needs looking at for HL2-style ladders.
 - **Chat gibberish.** Some bots occasionally put random text in chat without going through the

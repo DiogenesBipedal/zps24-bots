@@ -72,7 +72,8 @@ running (a few minutes; the server saves it):
 scripts/zps24-server.sh navgen
 ```
 
-The included map rotation (cabin and church) switches map every 2 rounds. Change maps any time
+The included map rotation (cabin, church and cinema) switches map every 2 rounds. Nav meshes for
+29 maps are included, so bots work on almost every stock map. Change maps any time
 from the admin menu or with `scripts/zps24-server.sh cmd "changelevel <map>"`.
 
 ### Server commands

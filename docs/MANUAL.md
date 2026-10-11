@@ -1525,6 +1525,40 @@ The file is a KeyValues text file per map in `data/zps24_learn/`, readable and e
   The "never shoot glass" rule lives in the line-of-fire trace, so every place that fires obeys
   it.
 
+### 11.8 Nav meshes for every map
+
+The request: bots on the cinema map, in the rotation, then meshes for all the other maps.
+
+- **Generate without disturbing the player.** A second server instance from the same install,
+  on another port with 2 slots, did the work while the player stayed on cabin (each instance
+  writes `.smnav` files into the shared data folder).
+- **"Generating Navigation Mesh..." and then nothing.** Generating kicks every bot (it's a
+  "dangerous" edit, 7.x), so the server is empty. An empty Source server stops *simulating*,
+  and NavBot's `GameFrame` hook returned early when not simulating, so generation never
+  advanced. It used to work only because the player was connected. Patch: keep calling
+  `TheNavMesh->Update()` while `IsGenerating()`, even when not simulating. Cinema then
+  generated in under a minute.
+- **Waiting on a server from a script.** The first batch run watched the server's stdout for
+  "nav mesh loaded" lines. That output is block-buffered into the log file, so lines arrived
+  late and the script raced ahead, changing maps every 2 seconds. Asking the server directly
+  (RCON `status` until it reports the new map) fixed it.
+- **Measuring the result.** After each map: reload, then `sm_navreach` from a bot to count
+  reachable areas. Most maps: 85-99%. Objective maps can show much less from one spawn
+  (shreddingfield: survivors 6%, zombies 68%) because they're built in sections that open as
+  objectives are done.
+- **The one failure, zpo_aquatica**: "Sampling walkable space" finished in 0.1 s with nothing.
+  The spawns exist and have a floor under them (`sm_floormap`), but the generator's ground trace
+  looks *through* entities it considers walkable; if the start areas stand on such entities, no
+  seed lands on usable ground. Left without a mesh (an empty mesh is worse: bots load it and
+  stand still).
+
+**Lessons.**
+- "Works on my server" can hide a dependency on someone being connected.
+- Don't scrape a buffered log to decide when something is ready; ask the program.
+- Measure every generated result; one number per map (reachability) catches bad meshes.
+- Never kill processes by matching a pattern that's also in your own command line (this bit
+  twice more tonight: `pkill -f srcds.exe`, then a `grep srcds_i486.*27035`). Track PIDs.
+
 ---
 
 ## 12. The Windows port
