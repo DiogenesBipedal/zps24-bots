@@ -131,3 +131,111 @@ stock void Doors_Reset(int client)
 	g_dr_next[client] = 0.0;
 	g_dr_skipUntil[client] = 0.0;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Door buttons. SourceMod can't list an entity's outputs, so read the map's own entity lump once
+// per map: for every func_button (by Hammer ID), whether its OnPressed/OnIn opens (or toggles) a
+// door or closes one, and which door (target name). Cabin's garage: each big door has an Open
+// button and a Close button side by side. Needs a big heap (#pragma dynamic).
+
+StringMap g_dr_btnAction;   // hammerid -> 1 opens/toggles, -1 closes
+StringMap g_dr_btnTarget;   // hammerid -> target name
+
+stock void Doors_LoadButtons()
+{
+	if (g_dr_btnAction == null) { g_dr_btnAction = new StringMap(); g_dr_btnTarget = new StringMap(); }
+	g_dr_btnAction.Clear();
+	g_dr_btnTarget.Clear();
+	char map[64], path[PLATFORM_MAX_PATH];
+	GetCurrentMap(map, sizeof(map));
+	Format(path, sizeof(path), "maps/%s.bsp", map);
+	File f = OpenFile(path, "rb", true);
+	if (f == null)
+		return;
+	int ofs, len;
+	f.Seek(8, SEEK_SET);
+	f.ReadInt32(ofs);
+	f.ReadInt32(len);
+	if (len <= 0 || len > 4 * 1024 * 1024)
+	{
+		delete f;
+		return;
+	}
+	char[] text = new char[len + 1];
+	f.Seek(ofs, SEEK_SET);
+	f.ReadString(text, len + 1, len);
+	delete f;
+	int pos = 0, opens = 0, closes = 0;
+	char block[4096];
+	while (pos < len)
+	{
+		int open = StrContains(text[pos], "{");
+		if (open == -1) break;
+		int close = StrContains(text[pos + open], "}");
+		if (close == -1) break;
+		int n = close + 2 > sizeof(block) ? sizeof(block) : close + 2;
+		strcopy(block, n, text[pos + open]);
+		pos += open + close + 1;
+		if (StrContains(block, "\"func_button\"") == -1)
+			continue;
+		int h = StrContains(block, "\"hammerid\" \"");
+		if (h == -1)
+			continue;
+		char hid[16];
+		BreakString(block[h + 11], hid, sizeof(hid));
+		int action = 0, at = -1;
+		if ((at = StrContains(block, ",Close,", false)) != -1)
+			action = -1;
+		int o = StrContains(block, ",Open,", false);
+		if (o == -1) o = StrContains(block, ",Toggle,", false);
+		if (o != -1) { action = 1; at = o; }
+		if (action == 0)
+			continue;
+		// The target: back from ",Open," to the opening quote.
+		int q = at;
+		while (q > 0 && block[q - 1] != '"') q--;
+		char target[64];
+		int tl = at - q + 1 > sizeof(target) ? sizeof(target) : at - q + 1;
+		strcopy(target, tl, block[q]);
+		g_dr_btnAction.SetValue(hid, action);
+		g_dr_btnTarget.SetString(hid, target);
+		if (action > 0) opens++; else closes++;
+	}
+	LogMessage("%s: %d door buttons open, %d close", map, opens, closes);
+}
+
+stock bool Doors_ButtonHid(int button, char[] hid, int size)
+{
+	if (g_dr_btnAction == null || !HasEntProp(button, Prop_Data, "m_iHammerID"))
+		return false;
+	IntToString(GetEntProp(button, Prop_Data, "m_iHammerID"), hid, size);
+	return true;
+}
+
+// 1 opens or toggles a door, -1 only closes one, 0 unknown.
+stock int Doors_ButtonAction(int button)
+{
+	char hid[16];
+	int action;
+	return Doors_ButtonHid(button, hid, sizeof(hid)) && g_dr_btnAction.GetValue(hid, action) ? action : 0;
+}
+
+// The door entity the button works (by its target name), or -1.
+stock int Doors_ButtonDoor(int button)
+{
+	char hid[16], target[64], name[64];
+	if (!Doors_ButtonHid(button, hid, sizeof(hid)) || !g_dr_btnTarget.GetString(hid, target, sizeof(target)))
+		return -1;
+	static const char classes[][] = { "func_door", "func_door_rotating", "prop_door_rotating" };
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int d = -1;
+		while ((d = FindEntityByClassname(d, classes[c])) != -1)
+		{
+			GetEntPropString(d, Prop_Data, "m_iName", name, sizeof(name));
+			if (StrEqual(name, target, false))
+				return d;
+		}
+	}
+	return -1;
+}

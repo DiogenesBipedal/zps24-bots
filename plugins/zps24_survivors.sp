@@ -18,6 +18,7 @@
 // Bots are steered through NavBot's scripted plugin command: OnScriptedUpdate() runs every bot
 // update and returns where the bot should walk.
 #include <sourcemod>
+#pragma dynamic 1048576   // 4 MB heap: Doors_LoadButtons reads the map's entity lump
 #include <sdktools>
 #include <navbot>
 #undef REQUIRE_EXTENSIONS
@@ -49,6 +50,9 @@ bool  g_builder[MAXPLAYERS + 1];
 int   g_buildLesson[MAXPLAYERS + 1] = { -1, ... };
 int   g_buildTries[MAXPLAYERS + 1];
 int   g_dropTries[MAXPLAYERS + 1];
+int   g_closeBtn[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // Close button we're going to press
+float g_closeUntil[MAXPLAYERS + 1];
+bool  g_closeWalking[MAXPLAYERS + 1];
 int   g_breakDoor[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // basement door being smashed
 float g_breakUntil[MAXPLAYERS + 1];         // "dropweapon" sent for the melee weapon in hand
 int   g_hammerFails[MAXPLAYERS + 1];       // offered the hammer and still don't have it
@@ -243,6 +247,7 @@ void LoadMapConfig()
 
 public void OnMapStart()
 {
+	Doors_LoadButtons();
 	LoadMapConfig();
 	Stairs_OnMapStart();          // hand-made stair routes, plus what the bots learned from you
 	ResetRound();
@@ -1369,6 +1374,112 @@ bool DoPlace(int client, NavBot bot, float moveGoal[3])
 	return false;
 }
 
+// Doors worked by buttons (cabin's garage): when one is open, the nearest free survivor bot goes
+// to its Close button and presses E, unless zombies are right there. Once a second.
+void AssignDoorClosers()
+{
+	if (!NavBotNavMesh.IsLoaded())
+		return;
+	int b = -1;
+	while ((b = FindEntityByClassname(b, "func_button")) != -1)
+	{
+		if (Doors_ButtonAction(b) >= 0)
+			continue;                     // not a Close button
+		int door = Doors_ButtonDoor(b);
+		if (door == -1 || !HasEntProp(door, Prop_Data, "m_toggle_state"))
+			continue;
+		int st = GetEntProp(door, Prop_Data, "m_toggle_state");
+		if (st != 0 && st != 2)
+			continue;                     // closed or closing
+		int ref = EntIndexToEntRef(b);
+		bool taken = false;
+		for (int i = 1; i <= MaxClients && !taken; i++)
+			taken = g_closeBtn[i] == ref && GetGameTime() < g_closeUntil[i];
+		if (taken)
+			continue;
+		float c[3], zd;
+		EntityCenter(b, c);
+		int best = 0;
+		float bestDist = 900.0;
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (!IsClientInGame(i) || !IsFakeClient(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_SURVIVORS || !NavBotManager.IsNavBot(i))
+				continue;
+			if (g_job[i] != JOB_NONE || g_builder[i] || GetGameTime() < g_closeUntil[i])
+				continue;
+			float me[3];
+			GetClientAbsOrigin(i, me);
+			float d = GetVectorDistance(me, c);
+			if (d < bestDist && FloatAbs(me[2] - c[2]) < 150.0) { bestDist = d; best = i; }
+		}
+		if (best == 0 || NearestZombieTo(c, 300.0, zd) != 0)
+			continue;
+		g_closeBtn[best] = ref;
+		g_closeUntil[best] = GetGameTime() + 15.0;
+		Debug("%N goes to close door %d (button %d)", best, door, b);
+	}
+}
+
+int NearestZombieTo(const float pos[3], float radius, float &dist)
+{
+	int best = 0;
+	dist = radius;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+			continue;
+		float p[3];
+		GetClientAbsOrigin(i, p);
+		float d = GetVectorDistance(p, pos);
+		if (d < dist) { dist = d; best = i; }
+	}
+	return best;
+}
+
+bool CloseDoorButton(int client, NavBot bot, float moveGoal[3])
+{
+	int b = EntRefToEntIndex(g_closeBtn[client]);
+	if (b == INVALID_ENT_REFERENCE || GetGameTime() > g_closeUntil[client])
+	{
+		g_closeBtn[client] = INVALID_ENT_REFERENCE;
+		return false;
+	}
+	int door = Doors_ButtonDoor(b);
+	int st = door != -1 ? GetEntProp(door, Prop_Data, "m_toggle_state") : 1;
+	float c[3], eye[3], zd;
+	EntityCenter(b, c);
+	if ((st != 0 && st != 2) || NearestZombieTo(c, 250.0, zd) != 0)
+	{
+		if (st == 3 || st == 1) Debug("%N closed the door", client);
+		g_closeBtn[client] = INVALID_ENT_REFERENCE;
+		g_closeUntil[client] = GetGameTime() + 5.0;   // (not straight back to it)
+		return false;                    // closing / closed, or zombies there: fight instead
+	}
+	GetClientEyePosition(client, eye);
+	if (GetVectorDistance(eye, c) > 64.0)
+	{
+		Address a = NavBotNavMesh.GetNearestNavArea(c, 200.0, false, true);
+		if (a != Address_Null)
+			NavBotNavArea.GetClosestPointOnArea(a, c, moveGoal);
+		else
+			moveGoal = c;
+		float me[3];
+		GetClientAbsOrigin(client, me);
+		if (GetVectorDistance(me, moveGoal) > 24.0)
+		{
+			g_closeWalking[client] = true;
+			return true;
+		}
+	}
+	g_closeWalking[client] = false;
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Closing the door");
+	NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
+	if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.1);
+	return true;
+}
+
 // A door-shaped func_breakable (thin, at least door height) whose middle is well below the
 // ground floor of the bot's home: a basement door.
 bool IsBasementDoor(int client, int ent)
@@ -2252,6 +2363,19 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		return Plugin_Continue;
 	}
 
+	// Closing a door the zombies opened from inside (cabin's garage): its Close button, E.
+	if (CloseDoorButton(client, bot, moveGoal))
+	{
+		if (g_closeWalking[client])
+		{
+			strcopy(g_state[client], sizeof(g_state[]), "closing a door: walking");
+			return MoveTo(client, moveGoal);
+		}
+		strcopy(g_state[client], sizeof(g_state[]), "closing a door: pressing E");
+		g_us_wantMove[client] = false;
+		return Plugin_Continue;
+	}
+
 	// A basement door in the way: break it (melee).
 	if (BreakBasementDoor(client, bot))
 	{
@@ -2496,7 +2620,10 @@ void UnstickFromDoors()
 Action Timer_Think(Handle timer)
 {
 	if (g_enable.BoolValue)
+	{
 		UnstickFromDoors();
+		AssignDoorClosers();
+	}
 
 	if (!g_enable.BoolValue || !LibraryExists("navbot") || !NavBotNavMesh.IsLoaded())
 		return Plugin_Continue;

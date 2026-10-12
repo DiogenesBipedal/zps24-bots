@@ -7,6 +7,7 @@
 //     of furniture, makes it attack that obstacle until it breaks.
 // NavBot's combat code still does the fighting once a survivor is in reach.
 #include <sourcemod>
+#pragma dynamic 1048576   // 4 MB heap: Doors_LoadButtons reads the map's entity lump
 #include <sdktools>
 #include <navbot>
 #include "include/zps24_unstick.inc"
@@ -187,6 +188,7 @@ public void OnMapStart()
 	}
 	Stairs_OnMapStart();
 	ResetPlacements();
+	Doors_LoadButtons();
 	g_doorsLinked = false;
 	CreateTimer(0.5, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -729,7 +731,11 @@ void RelinkOpenedButtonDoors()
 				Address a = SideArea(p, n, 1.0, pa);
 				Address b = SideArea(p, n, -1.0, pb);
 				if (a == Address_Null || b == Address_Null || a == b || FloatAbs(pa[2] - pb[2]) > 24.0)
+				{
+					Debug("  relink at %.0f %.0f %.0f: side areas %d / %d (z %.0f / %.0f)", p[0], p[1], p[2],
+						a != Address_Null ? NavBotNavArea.GetID(a) : -1, b != Address_Null ? NavBotNavArea.GetID(b) : -1, pa[2], pb[2]);
 					continue;
+				}
 				if (!NavBotNavArea.IsConnectedToAny(a, b) && NavBotNavArea.ConnectToAdjacent(a, b)) made++;
 				if (!NavBotNavArea.IsConnectedToAny(b, a) && NavBotNavArea.ConnectToAdjacent(b, a)) made++;
 			}
@@ -1125,8 +1131,11 @@ int UpdateBreach(int client, NavBot bot, const float me[3], int target, float mo
 int DoorBar(int door)
 {
 	static const char props[][] = { "func_physbox", "func_physbox_multiplayer", "prop_physics_multiplayer", "prop_physics", "prop_physics_override" };
-	float dc[3];
+	float dc[3], dorg[3], dmax[3];
 	CenterOf(door, dc);
+	GetEntPropVector(door, Prop_Data, "m_vecAbsOrigin", dorg);
+	GetEntPropVector(door, Prop_Send, "m_vecMaxs", dmax);
+	float doorTop = dorg[2] + dmax[2];
 	int best = -1;
 	float bestDist = 75.0;
 	for (int k = 0; k < sizeof(props); k++)
@@ -1136,6 +1145,8 @@ int DoorBar(int door)
 		{
 			float pc[3];
 			CenterOf(p, pc);
+			if (pc[2] > doorTop - 4.0)
+				continue;          // above the door: its other half (cabin's garage side door), not a bar
 			float d = GetVectorDistance(pc, dc);
 			if (d < bestDist) { bestDist = d; best = p; }
 		}
@@ -1145,6 +1156,15 @@ int DoorBar(int door)
 
 // Inside, next to a closed door worked by a button (cabin's garage doors): walk to the button
 // and press E until the door opens, so the horde can come in.
+// The button's own door is closed (from the map's wiring); unknown wiring: any closed door near.
+bool ButtonDoorClosed(int button, const float c[3])
+{
+	int door = Doors_ButtonDoor(button);
+	if (door != -1)
+		return HasEntProp(door, Prop_Data, "m_toggle_state") && GetEntProp(door, Prop_Data, "m_toggle_state") == 1;
+	return DoorClosedNear(c, 300.0);
+}
+
 bool DoorClosedNear(const float pos[3], float radius)
 {
 	static const char doors[][] = { "func_door_rotating", "func_door" };
@@ -1190,10 +1210,12 @@ void StartOpenButton(int client, const float me[3])
 		float c[3];
 		CenterOf(b, c);
 		float d = GetVectorDistance(c, me);
-		if (d >= bestDist || FloatAbs(c[2] - me[2]) > 120.0 || !Learned_Indoors(c) || !DoorClosedNear(c, 300.0))
+		if (d >= bestDist || FloatAbs(c[2] - me[2]) > 120.0 || !Learned_Indoors(c) || !ButtonDoorClosed(b, c))
 			continue;
 		if (ButtonsNear(c, 150.0) >= 3)
 			continue;                 // a keypad, not a door switch
+		if (Doors_ButtonAction(b) < 0)
+			continue;                 // it closes the door
 		// Same side of the door as us: we can see the button (not through the closed door).
 		float eye[3];
 		GetClientEyePosition(client, eye);
@@ -1220,10 +1242,12 @@ int UpdateButton(int client, NavBot bot, const float me[3], float moveGoal[3])
 	}
 	float c[3], eye[3];
 	CenterOf(b, c);
-	if (!DoorClosedNear(c, 300.0))
+	if (!ButtonDoorClosed(b, c))
 	{
-		Debug("%N opened the doors", client);
+		// Open (or opening): on to the next closed door's button, if any, else the survivors.
+		Debug("%N opened the door", client);
 		g_btn[client] = INVALID_ENT_REFERENCE;
+		g_btnCheck[client] = 0.0;
 		return ENTRY_NONE;
 	}
 	GetClientEyePosition(client, eye);
@@ -2331,8 +2355,8 @@ int LinkDoors(bool verbose)
 			float thin = sx < sy ? sx : sy, wide = sx < sy ? sy : sx;
 			if (thin > 16.0 || wide < 24.0 || wide > 140.0)
 				continue;                    // not an opening-shaped thing
-			if (isDoor && (sz < 70.0 || sz > 160.0))
-				continue;
+			if (isDoor && (sz < 50.0 || sz > 160.0))
+				continue;                    // (50: cabin's garage side door is a 55-unit bottom half with a hinged top)
 			if (!isDoor && !isPlank && (sz < 20.0 || sz > 140.0))
 				continue;
 			float n[3];

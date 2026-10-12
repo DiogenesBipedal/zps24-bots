@@ -402,6 +402,8 @@ Action Cmd_NavButtonDoors(int args)
 						bool crosses = (ca[axis] - plane) * (cb[axis] - plane) < 0.0;
 						if (!crosses || mid[other] < lo[other] - 8.0 || mid[other] > hi[other] + 8.0 || mid[2] > hi[2] || mid[2] < lo[2] - 40.0)
 							continue;
+						if (!apply)
+							PrintToServer("[navbuttondoors]   #%d -> #%d", NavBotNavArea.GetID(a), NavBotNavArea.GetID(b));
 						fromA[found] = a;
 						toB[found] = b;
 						found++;

@@ -1907,6 +1907,29 @@ re-picked their target every 8-14 s, and one that had reached the open side door
 after someone else. Now a zombie keeps its target while it is getting into a building (heading
 for an entrance, breaking it, going through, opening its doors).
 
+**The wooden door was open and still ignored.** The nav mesh had no connection through it at all:
+the garage floor ended at x 875, the outside at x 900. The door-linking code (`LinkDoors`) skipped
+it for two reasons. The door entity is only the bottom half (55 units tall; the minimum was 70,
+now 50). And the hinged top half above it looked like a plank barring it (`DoorBar`: a physics
+object within 75 units), so a prop whose middle is above the door's top edge no longer counts as
+a bar. Since then zombies come in through it.
+
+**Open and Close buttons.** Each big door has two buttons 5 units apart: the upper one opens it,
+the lower one closes it. The zombies pressed whichever was nearest, so one opened the door and
+the next closed it. SourceMod can't list an entity's outputs, so `Doors_LoadButtons`
+(`plugins/include/zps24_doors.inc`) reads the map's own .bsp entity lump at map start (it needs
+a 4 MB heap, `#pragma dynamic`). For every func_button it records, by Hammer ID, whether
+OnPressed opens (or toggles) a door or closes one, and which door. On cabin: 6 open, 3 close.
+
+- **Zombies** only press Open buttons, only while that button's own door is closed. An open door
+  is left alone until survivors close it. Once their door is open, they move on to the next
+  closed door's button, if any, then the survivors (a zombie used to keep pressing because the
+  other garage door, also near the button, was still closed).
+- **Survivor bots close it**: when a button-worked door is open and no zombie is within 300 units
+  of its Close button, the nearest free survivor bot (no job, not a builder, within 900 units,
+  same floor) walks to the button and presses E until the door starts closing (state "closing a
+  door"). It gives up if zombies get within 250 units of the button.
+
 Tried and dropped along the way: ranking entrances by toughness (it turned zombies away from the
 wooden door, which is the right way in here), and pressing the button through the broken glass
 ("they can't reach that button"). Kept: after one pane of a stacked window breaks, the zombie
