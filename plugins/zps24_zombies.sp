@@ -103,6 +103,11 @@ int g_comp[COMP_MAX_ID];
 // Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
 // staging point out of their sight, then rush together.
 ConVar g_waves;
+bool  g_swimExit[MAXPLAYERS + 1];      // steering out of the water onto g_swimExitPos
+float g_swimExitPos[MAXPLAYERS + 1][3];
+float g_swimUntil[MAXPLAYERS + 1];
+int   g_swimRoute[MAXPLAYERS + 1] = { -1, ... };   // learned route out of the water being followed
+int   g_swimStep[MAXPLAYERS + 1];
 int   g_stopTries[MAXPLAYERS + 1];
 #define ENTRY_NONE  0
 #define ENTRY_PATH  1      // moveGoal set: path there
@@ -324,6 +329,123 @@ int UpdateHorde(int client, const float me[3], const float target[3], bool sees,
 		return ENTRY_STEER;          // wait for the others
 	moveGoal = g_stagePos;
 	return ENTRY_PATH;
+}
+
+int WaterLevel(int client)
+{
+	return HasEntProp(client, Prop_Data, "m_nWaterLevel") ? GetEntProp(client, Prop_Data, "m_nWaterLevel") : 0;
+}
+
+// Swimming. Source lets a player out of the water onto a ledge ("water jump") when they hold jump
+// and push forward while facing it, at the surface. NavBot just walks its path, so zombies paddled
+// against a dock or the bank forever. In the water we always hold jump (stay at the surface, and
+// any ledge on the path gets climbed); stuck for a second, we pick the nearest walkable area just
+// above the water and steer onto it ourselves, facing it. Returns true while steering.
+bool UpdateSwim(int client, NavBot bot)
+{
+	int level = WaterLevel(client);
+	bool onRoute = g_swimExit[client] && g_swimRoute[client] != -1 && GetGameTime() < g_swimUntil[client];
+	if (level < 2 && !onRoute)
+	{
+		g_swimExit[client] = false;
+		return false;               // out (a learned way out is followed to its end, below)
+	}
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_JUMP, 0.3);
+	float me[3];
+	GetClientAbsOrigin(client, me);
+	if (!g_swimExit[client])
+	{
+		// Always get out of the water first, before hunting anyone (the main player's rule).
+		// 1. The main player's own way out: a learned route that starts in the water and ends on
+		//    dry ground higher up (zpo_lake_of_the_dead: climbing out at -40 1147). Follow it point
+		//    by point.
+		float best[3], bestDist = 999999.0;
+		int route = -1;
+		for (int r = 0; r < g_ln_routeCount; r++)
+		{
+			int last = g_ln_routeLen[r] - 1;
+			if (last < 1 || g_ln_routes[r][last][2] < g_ln_routes[r][0][2] + 60.0)
+				continue;
+			float w[3], dry[3];
+			w = g_ln_routes[r][0];
+			w[2] += 16.0;
+			dry = g_ln_routes[r][last];
+			dry[2] += 16.0;
+			if (!(TR_GetPointContents(w) & MASK_WATER) || (TR_GetPointContents(dry) & MASK_WATER))
+				continue;
+			float flat[3];
+			flat = g_ln_routes[r][0];
+			flat[2] = me[2];
+			float d = GetVectorDistance(me, flat);
+			if (d < 2500.0 && d < bestDist) { bestDist = d; best = flat; route = r; }
+		}
+		g_swimRoute[client] = route;
+		g_swimStep[client] = 0;
+		// 2. Else the nearest walkable area out of the water that we can get onto: a bank or ramp
+		//    at about our height, or a ledge low enough for a water jump (not a platform 100+ up).
+		float routeDist = bestDist;
+		{
+			float lo[3], hi[3];
+			for (int i = 0; i < 3; i++) { lo[i] = me[i] - 500.0; hi[i] = me[i] + 500.0; }
+			lo[2] = me[2] - 40.0;
+			hi[2] = me[2] + 60.0;
+			NavBotNavAreaVector v = NavBotNavMesh.CollectAreasOverlappingExtent(lo, hi);
+			for (int i = 0; i < v.Size; i++)
+			{
+				float p[3];
+				NavBotNavArea.GetClosestPointOnArea(v.At(i), me, p);
+				if (p[2] < me[2] - 40.0 || p[2] > me[2] + 60.0)
+					continue;
+				p[2] += 4.0;
+				if (TR_GetPointContents(p) & MASK_WATER)
+					continue;          // still in the water
+				float d = GetVectorDistance(me, p);
+				if (d < 500.0 && d + 400.0 < routeDist && d < bestDist) { bestDist = d; best = p; route = -1; }
+			}
+			delete v;
+			g_swimRoute[client] = route;
+			if (bestDist > 2500.0)
+				return false;
+		}
+		g_swimExitPos[client] = best;
+		g_swimExit[client] = true;
+		g_swimUntil[client] = GetGameTime() + (route != -1 ? 12.0 + bestDist / 150.0 : 10.0);
+		Debug("%N climbing out of the water at %.0f %.0f %.0f (%s, from %.0f %.0f %.0f water %d)", client, best[0], best[1], best[2],
+			route != -1 ? "the main player's way out" : "bank", me[0], me[1], me[2], level);
+	}
+	if (GetGameTime() > g_swimUntil[client])
+	{
+		g_swimExit[client] = false;
+		return false;
+	}
+	int r = g_swimRoute[client];
+	if (r != -1)
+	{
+		// At the route start (or a point along it): on to the next point.
+		float flat[3], wp[3];
+		wp = g_ln_routes[r][g_swimStep[client]];
+		flat = wp;
+		flat[2] = me[2];
+		if (GetVectorDistance(me, flat) < 40.0 && FloatAbs(wp[2] - me[2]) < 70.0)
+		{
+			if (g_swimStep[client] == g_ln_routeLen[r] - 1)
+			{
+				Debug("%N is out of the water (the main player's way)", client);
+				g_swimExit[client] = false;
+				return false;
+			}
+			g_swimStep[client]++;
+		}
+		g_swimExitPos[client] = g_ln_routes[r][g_swimStep[client]];
+	}
+	float look[3];
+	look = g_swimExitPos[client];
+	look[2] += 40.0;
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, look, LOOK_PRIORITY, 0.3, "Climbing out of the water");
+	NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_FORWARDS, 0.3);
+	NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), g_swimExitPos[client], 100);
+	return true;
 }
 
 // Walls only: players and props don't block the view for this purpose.
@@ -1433,6 +1555,13 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		return Plugin_Stop;
 	}
 
+	// In the water: swim up and climb out onto the bank or a platform.
+	if (UpdateSwim(client, bot))
+	{
+		g_us_wantMove[client] = false;
+		return Plugin_Continue;
+	}
+
 	if (UpdateShove(client, bot))
 		return Plugin_Continue;
 
@@ -1987,7 +2116,7 @@ Action Cmd_Status(int args)
 			NavBotBehaviorInterface.GetTaskDebugString(NavBotManager.GetNavBotByIndex(i).GetBehaviorInterface(), task, sizeof(task));
 		int tg = g_target[i];
 		if (IsLiveSurvivor(tg)) GetClientAbsOrigin(tg, t);
-		PrintToServer("%N at %.0f %.0f %.0f scripted %d -> target %d (%.0f away) goal %.0f %.0f %.0f stuck %.0f s | %s", i, me[0], me[1], me[2], g_scripted[i],
+		PrintToServer("%N at %.0f %.0f %.0f water %d scripted %d -> target %d (%.0f away) goal %.0f %.0f %.0f stuck %.0f s | %s", i, me[0], me[1], me[2], WaterLevel(i), g_scripted[i],
 			tg, IsLiveSurvivor(tg) ? GetVectorDistance(me, t) : -1.0, g_goal[i][0], g_goal[i][1], g_goal[i][2], Unstick_StuckFor(i), task);
 	}
 	return Plugin_Handled;
