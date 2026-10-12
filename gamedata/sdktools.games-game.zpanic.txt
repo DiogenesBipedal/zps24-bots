@@ -4,6 +4,20 @@
 	{
 		"Offsets"
 		{
+			/* Temp entities (beams, sparks...): same layout as SourceMod's other Source 2007
+			 * mods (engine.ep2.txt); the 2.4 server_i486.so exports s_pTempEntities. */
+			"GetTEName"
+			{
+				"linux"		"4"
+			}
+			"GetTENext"
+			{
+				"linux"		"8"
+			}
+			"TE_GetServerClass"
+			{
+				"linux"		"0"
+			}
 			"GiveNamedItem"
 			{
 				"linux"		"359"
@@ -75,6 +89,11 @@
 		}
 		"Signatures"
 		{
+			"s_pTempEntities"
+			{
+				"library"	"server"
+				"linux"		"@_ZN15CBaseTempEntity15s_pTempEntitiesE"
+			}
 			"FireOutput"
 			{
 				"library"		"server"

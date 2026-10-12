@@ -1785,6 +1785,16 @@ zombie bot with its target, goal and current NavBot task) showed `scripted 0` an
 the bot's task string. No `ScriptedBehavior` means the script isn't running, and after 4
 unanswered stops the plugin starts it regardless.
 
+**The hook's line, and "TempEntity System unsupported".** Every frame of the grappling hook (V)
+logged an exception from `TE_SetupBeamPoints`, and the beam never showed. SourceMod's
+temp-entity support (beams, sparks, smoke: effects sent to clients without an entity) has to find
+the server's list of temp-entity types, `CBaseTempEntity::s_pTempEntities`. Its own gamedata
+lists that only for a few named Source 2007 mods, not ZPS. The 2.4 `server_i486.so` exports the
+symbol, so `gamedata/sdktools.games-game.zpanic.txt` now names it, with the same three offsets
+the other 2007 mods use (name 4, next 8, server class 0). Check with `sm_dump_teprops te.txt`:
+it writes 44 temp entities (into `zps/`). SDKTools reads this at startup, so it takes effect
+after a server restart.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
