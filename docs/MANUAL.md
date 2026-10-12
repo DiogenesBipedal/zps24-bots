@@ -1826,6 +1826,16 @@ so zombies go around over land, to the doors and windows. Done on all four lake 
 connections each. (Removing connections kicks every bot, so it's done on the test server, and
 the main server picks up the saved mesh at the next map load.)
 
+**Still looping.** Dry-to-water wasn't enough. The exit slope on zpo_lake_of_the_dead is one big
+nav area from z 6 to 148 that counts as water, and it was linked to the rest of the lake. From
+there the shortest path to almost anyone was to swim across and climb out on the far side. Now
+`sm_navwater apply` removes **every** connection into a water area, from water too: water areas
+only lead out, onto dry ground. In the lake there is no path anywhere but out, and the swim
+logic steers to the way out (the teacher's route within 4000 units, else the nearest bank within
+1500). It also starts when a zombie wades ankle deep in a lake area, not only waist deep.
+Removed: 2300-5400 connections per lake map (the command handles 4096 per run, so run it again
+until it reports 0).
+
 `sm_contents x y z` prints the brush contents at a point (`WATER` or not), to check what counts
 as water.
 

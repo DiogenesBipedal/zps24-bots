@@ -331,6 +331,19 @@ int UpdateHorde(int client, const float me[3], const float target[3], bool sees,
 	return ENTRY_PATH;
 }
 
+// Is the nav area under us a water area (its middle in water)? Puddles on dry ground aren't.
+bool StandingInWater(int client)
+{
+	float me[3], c[3];
+	GetClientAbsOrigin(client, me);
+	Address a = NavBotNavMesh.GetNearestNavArea(me, 120.0, false, true);
+	if (a == Address_Null)
+		return false;
+	NavBotNavArea.GetCenter(a, c);
+	c[2] += 16.0;
+	return (TR_GetPointContents(c) & MASK_WATER) != 0;
+}
+
 int WaterLevel(int client)
 {
 	return HasEntProp(client, Prop_Data, "m_nWaterLevel") ? GetEntProp(client, Prop_Data, "m_nWaterLevel") : 0;
@@ -344,6 +357,8 @@ int WaterLevel(int client)
 bool UpdateSwim(int client, NavBot bot)
 {
 	int level = WaterLevel(client);
+	if (level == 1 && !g_swimExit[client] && StandingInWater(client))
+		level = 2;                  // wading in the lake's shallows: get out all the same
 	bool onRoute = g_swimExit[client] && g_swimRoute[client] != -1 && GetGameTime() < g_swimUntil[client];
 	if (level < 2 && !onRoute)
 	{
@@ -378,7 +393,7 @@ bool UpdateSwim(int client, NavBot bot)
 			flat = g_ln_routes[r][0];
 			flat[2] = me[2];
 			float d = GetVectorDistance(me, flat);
-			if (d < 2500.0 && d < bestDist) { bestDist = d; best = flat; route = r; }
+			if (d < 4000.0 && d < bestDist) { bestDist = d; best = flat; route = r; }
 		}
 		g_swimRoute[client] = route;
 		g_swimStep[client] = 0;
@@ -387,7 +402,7 @@ bool UpdateSwim(int client, NavBot bot)
 		float routeDist = bestDist;
 		{
 			float lo[3], hi[3];
-			for (int i = 0; i < 3; i++) { lo[i] = me[i] - 500.0; hi[i] = me[i] + 500.0; }
+			for (int i = 0; i < 3; i++) { lo[i] = me[i] - 1500.0; hi[i] = me[i] + 1500.0; }
 			lo[2] = me[2] - 40.0;
 			hi[2] = me[2] + 60.0;
 			NavBotNavAreaVector v = NavBotNavMesh.CollectAreasOverlappingExtent(lo, hi);
@@ -401,11 +416,11 @@ bool UpdateSwim(int client, NavBot bot)
 				if (TR_GetPointContents(p) & MASK_WATER)
 					continue;          // still in the water
 				float d = GetVectorDistance(me, p);
-				if (d < 500.0 && d + 400.0 < routeDist && d < bestDist) { bestDist = d; best = p; route = -1; }
+				if (d < 1500.0 && d + 400.0 < routeDist && d < bestDist) { bestDist = d; best = p; route = -1; }
 			}
 			delete v;
 			g_swimRoute[client] = route;
-			if (bestDist > 2500.0)
+			if (bestDist > 4000.0)
 				return false;
 		}
 		g_swimExitPos[client] = best;

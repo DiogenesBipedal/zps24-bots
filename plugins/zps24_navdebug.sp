@@ -8,8 +8,9 @@
 //   sm_navfixdrops [apply]           drop-down connections a player can't actually take (a railing
 //                                    or glass on the ledge): list them, or with "apply" remove them
 //                                    (then sm_nav_save to keep the fixed mesh)
-//   sm_navwater [apply]              connections from dry ground into water: list them, or remove
-//                                    them so paths never lead into a lake (getting out still works)
+//   sm_navwater [apply]              connections into water areas (from anywhere): list them, or
+//                                    remove them, so paths never lead into or across a lake; the
+//                                    ways out of the water stay
 #include <sourcemod>
 #include <sdktools>
 #include <navbot>
@@ -306,7 +307,7 @@ Action Cmd_NavWater(int args)
 	for (int i = 0; i < v.Size; i++)
 	{
 		Address a = v.At(i);
-		if (AreaInWater(a)) { wet++; continue; }
+		if (AreaInWater(a)) wet++;
 		for (int d = 0; d < 4; d++)
 		{
 			int n = NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
@@ -321,13 +322,13 @@ Action Cmd_NavWater(int args)
 			}
 		}
 	}
-	PrintToServer("[navwater] %d of %d areas are in water; %d connections lead from dry ground into it", wet, v.Size, found);
+	PrintToServer("[navwater] %d of %d areas are in water; %d connections lead into it", wet, v.Size, found);
 	delete v;
 	if (apply)
 	{
 		for (int i = 0; i < found; i++)
 			NavBotNavArea.DisconnectFromAdjacent(fromA[i], toB[i]);
-		PrintToServer("[navwater] removed them (the ways out of the water stay); sm_nav_save to keep");
+		PrintToServer("[navwater] removed them: water areas only lead out now; sm_nav_save to keep");
 	}
 	return Plugin_Handled;
 }
