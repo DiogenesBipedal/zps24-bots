@@ -1136,6 +1136,9 @@ int DoorBar(int door)
 	GetEntPropVector(door, Prop_Data, "m_vecAbsOrigin", dorg);
 	GetEntPropVector(door, Prop_Send, "m_vecMaxs", dmax);
 	float doorTop = dorg[2] + dmax[2];
+	float dmin[3];
+	GetEntPropVector(door, Prop_Send, "m_vecMins", dmin);
+	float doorBottom = dorg[2] + dmin[2];
 	int best = -1;
 	float bestDist = 75.0;
 	for (int k = 0; k < sizeof(props); k++)
@@ -1143,8 +1146,12 @@ int DoorBar(int door)
 		int p = -1;
 		while ((p = FindEntityByClassname(p, props[k])) != -1)
 		{
+			if (p == door)
+				continue;          // a physics door isn't its own bar
 			float pc[3];
 			CenterOf(p, pc);
+			if (pc[2] < doorBottom + 15.0)
+				continue;          // knocked down, lying on the floor: not barring anything
 			if (pc[2] > doorTop - 4.0)
 				continue;          // above the door: its other half (cabin's garage side door), not a bar
 			float d = GetVectorDistance(pc, dc);
@@ -1271,9 +1278,25 @@ int UpdateButton(int client, NavBot bot, const float me[3], float moveGoal[3])
 }
 
 // After climbing in: the nearest barred door of this house, on our floor.
+// A door that's a physics object swinging on a hinge (cabin's main house: "newhousedoor1" at the
+// front, "newdoor" at the back, held shut by wooden planks): a door-shaped func_physbox.
+bool IsPhysDoor(int ent)
+{
+	char cls[64];
+	GetEntityClassname(ent, cls, sizeof(cls));
+	if (StrContains(cls, "func_physbox") == -1 || !HasEntProp(ent, Prop_Send, "m_vecMins"))
+		return false;
+	float mins[3], maxs[3];
+	GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
+	GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
+	float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1], sz = maxs[2] - mins[2];
+	float thin = sx < sy ? sx : sy, wide = sx < sy ? sy : sx;
+	return thin <= 12.0 && wide >= 36.0 && wide <= 70.0 && sz >= 70.0 && sz <= 130.0;
+}
+
 void StartUnbar(int client, const float me[3])
 {
-	static const char doors[][] = { "func_door_rotating", "prop_door_rotating", "func_door" };
+	static const char doors[][] = { "func_door_rotating", "prop_door_rotating", "func_door", "func_physbox", "func_physbox_multiplayer" };
 	int best = -1;
 	float bestDist = 700.0;
 	for (int c = 0; c < sizeof(doors); c++)
@@ -1281,6 +1304,8 @@ void StartUnbar(int client, const float me[3])
 		int door = -1;
 		while ((door = FindEntityByClassname(door, doors[c])) != -1)
 		{
+			if (c >= 3 && !IsPhysDoor(door))
+				continue;
 			float dc[3];
 			CenterOf(door, dc);
 			if (FloatAbs(dc[2] - me[2]) > 100.0 || DoorBar(door) == -1)
@@ -1311,9 +1336,21 @@ int UpdateUnbar(int client, NavBot bot, const float me[3], float moveGoal[3])
 	int bar = DoorBar(door);
 	if (bar == -1)
 	{
-		// Clear: open it for the others.
-		AcceptEntityInput(door, "Unlock", client, client);
-		AcceptEntityInput(door, "Open", client, client);
+		// Clear: open it for the others. A physics door: shove it outward, it swings on its hinge.
+		if (IsPhysDoor(door))
+		{
+			float push[3];
+			SubtractVectors(dc, me, push);
+			push[2] = 0.0;
+			NormalizeVector(push, push);
+			ScaleVector(push, 300.0);
+			TeleportEntity(door, NULL_VECTOR, NULL_VECTOR, push);
+		}
+		else
+		{
+			AcceptEntityInput(door, "Unlock", client, client);
+			AcceptEntityInput(door, "Open", client, client);
+		}
 		Debug("%N unbarred and opened door %d", client, door);
 		g_unbarDoor[client] = INVALID_ENT_REFERENCE;
 		return ENTRY_NONE;

@@ -1935,6 +1935,35 @@ wooden door, which is the right way in here), and pressing the button through th
 ("they can't reach that button"). Kept: after one pane of a stacked window breaks, the zombie
 smashes the next pane in the same column (`NextPane`) before trying to climb in.
 
+### 11.19 The main house doors: physics doors held by planks
+
+On zpo_cabin_outbreak every zombie went in through the windows; nobody used the main house's
+front or back door. Why: both are **physics doors** (a door-shaped `func_physbox` on a
+`phys_hinge`: "newhousedoor1" at the front (-548, -562), "newdoor" at the back (-557, 97)), held
+shut by wooden plank physboxes: 2 x 1000 hp at the front, 1 x 2500 hp at the back. The entrance
+logic only knows real doors (func_door, func_door_rotating, prop_door_rotating) and glass, and the
+"climb in, then unbar a door from inside" routine (`StartUnbar`) only looked at real doors too.
+For the zombies these doors didn't exist.
+
+**The teacher's demonstration** (logged every 0.2 s: their position, view and buttons, and each
+plank's and door's position, angle and health):
+
+1. From outside, left click at the upper plank, aiming about 35 degrees up. After a few hits it
+   jumps off its brackets and falls inside. It lost only 42 of 1000 hp: hits knock planks
+   loose, they don't break them.
+2. The lower plank can't really be reached from outside (a crouched right-click shove only
+   nudged it).
+3. Round to the window just south (-527, -624): break it, crouch-jump in.
+4. From inside, left click the lower plank (about 10 hits) until it drops, then push the door:
+   it swings open on its hinge.
+
+**What the bots do now:** step 4. `StartUnbar` also considers physics doors (`IsPhysDoor`: a
+func_physbox 36-70 wide, 70-130 tall, at most 12 thick). `DoorBar` skips the door itself (a
+physics door isn't its own bar) and ignores planks lying on the floor (middle less than 15 units
+above the door's bottom edge). Planks are brushes of material wood, so `IsWooden` says left
+click. Once no plank is left, the zombie shoves the door outward (300 units/s) instead of the
+"Open" input a real door gets, and it swings open for the horde.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
