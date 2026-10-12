@@ -50,6 +50,10 @@ bool  g_builder[MAXPLAYERS + 1];
 int   g_buildLesson[MAXPLAYERS + 1] = { -1, ... };
 int   g_buildTries[MAXPLAYERS + 1];
 int   g_dropTries[MAXPLAYERS + 1];
+int   g_buildScan[MAXPLAYERS + 1];   // which aim offset DoBuild is trying
+int   g_buildAmmo[MAXPLAYERS + 1];   // boards carried when the hammering started
+float g_nextNail[MAXPLAYERS + 1];
+float g_clickUntil[MAXPLAYERS + 1];  // a builder's left click, held until then
 int   g_closeBtn[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // Close button we're going to press
 float g_closeUntil[MAXPLAYERS + 1];
 bool  g_closeWalking[MAXPLAYERS + 1];
@@ -725,6 +729,7 @@ int BuildDefendSpots(int h, Address start)
 			+ (neighbours <= 2 ? 200.0 : 0.0)
 			- GetVectorDistance(centers[i], g_homePos[h]) * 0.1
 			- (NearWindow(h, centers[i], 150.0) ? 5000.0 : 0.0)
+			- (AtEdge(centers[i]) ? 5000.0 : 0.0)      // a roof edge with no railing: they fall off
 			- (roofed[i] ? 0.0 : (indoor >= 6 ? 5000.0 : 600.0));
 	}
 	delete v;
@@ -1669,11 +1674,24 @@ bool GetHammer(int client, NavBot bot, float moveGoal[3])
 // The build job: hammer in hand, go where the main player stood, aim where they aimed, hold attack
 // through the whole hammer animation (the board only goes up at its end), check it went up.
 // Returns true while walking to moveGoal.
+// ZPS 2.4's hammer waits for the player's game client to report the board size
+// (m_bIsSmallBoardObtained); a bot has no client, so its hammer never got ready and no board ever
+// went up. Report it for them: the large board.
+void HammerReady(int tool)
+{
+	if (HasEntProp(tool, Prop_Send, "m_bIsSmallBoardObtained") && !GetEntProp(tool, Prop_Send, "m_bIsSmallBoardObtained"))
+	{
+		SetEntProp(tool, Prop_Send, "m_bIsSmallBoard", 0);
+		SetEntProp(tool, Prop_Send, "m_bIsSmallBoardObtained", 1);
+	}
+}
+
 bool DoBuild(int client, NavBot bot, float moveGoal[3])
 {
 	int tool = FindOwnedWeapon(client, "weapon_barricade");
 	if (tool == -1)
 		return GetHammer(client, bot, moveGoal);
+	HammerReady(tool);
 	g_hammerFails[client] = 0;
 	g_spawnedHammer[client] = INVALID_ENT_REFERENCE;
 
@@ -1718,21 +1736,56 @@ bool DoBuild(int client, NavBot bot, float moveGoal[3])
 		return false;
 	}
 	Address ctrl = bot.GetPlayerControllerInterface();
-	NavBotPlayerControllerInterface.AimAtPos(ctrl, g_ln_boardAim[b], LOOK_PRIORITY, 0.5, "Nailing a board");
+	// Aim where the main player aimed; if the game says no board fits from where we stand (we
+	// may stand lower than they did), sweep the aim around it until one does.
+	static const float offs[][2] = { {0.0, 0.0}, {0.0, 10.0}, {0.0, -10.0}, {0.0, 20.0}, {0.0, -20.0}, {12.0, 0.0}, {-12.0, 0.0},
+		{12.0, 10.0}, {-12.0, 10.0}, {12.0, -10.0}, {-12.0, -10.0}, {0.0, 30.0}, {0.0, -30.0}, {20.0, 0.0}, {-20.0, 0.0} };
+	int k = g_buildScan[client] % sizeof(offs);
+	float aim[3], side[3], toAim[3];
+	SubtractVectors(g_ln_boardAim[b], me, toAim);
+	toAim[2] = 0.0;
+	NormalizeVector(toAim, toAim);
+	side[0] = -toAim[1]; side[1] = toAim[0]; side[2] = 0.0;
+	aim = g_ln_boardAim[b];
+	aim[0] += side[0] * offs[k][0];
+	aim[1] += side[1] * offs[k][0];
+	aim[2] += offs[k][1];
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, aim, LOOK_PRIORITY, 0.5, "Nailing a board");
 	if (g_hammerUntil[client] == 0.0)
 	{
 		if (!NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
 			return false;
-		g_hammerUntil[client] = GetGameTime() + 4.5;
+		if (g_canAttach != null && !SDKCall(g_canAttach, tool))
+		{
+			if (++g_buildScan[client] % sizeof(offs) == 0)
+			{
+				Debug("%N: no spot for board %d fits from here", client, b);
+				g_hammerUntil[client] = GetGameTime();   // counts as a failed try below
+				g_hammerBoardsBefore[client] = CountBoardsNear(g_ln_boardPos[b], 60.0);
+			}
+			return false;
+		}
+		g_buildAmmo[client] = GetEntProp(client, Prop_Send, "m_iAmmo", _, 7) + GetEntProp(tool, Prop_Send, "m_iClip1");
+		Debug("%N: board %d fits (aim offset %.0f %.0f), hammering (%d boards)", client, b, offs[k][0], offs[k][1], g_buildAmmo[client]);
+		g_hammerUntil[client] = GetGameTime() + 6.0;
 		g_hammerBoardsBefore[client] = CountBoardsNear(g_ln_boardPos[b], 60.0);
 	}
 	if (GetGameTime() < g_hammerUntil[client])
 	{
-		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.3);
+		// Separate clicks, one per nail: a held button only counts once.
+		if (GetGameTime() >= g_nextNail[client])
+		{
+			// Straight into the bot's usercmd (OnPlayerRunCmd): the hammer reads the real buttons.
+			g_clickUntil[client] = GetGameTime() + 0.15;
+			g_nextNail[client] = GetGameTime() + 0.6;
+		}
 		return false;
 	}
 	g_hammerUntil[client] = 0.0;
-	if (CountBoardsNear(g_ln_boardPos[b], 60.0) > g_hammerBoardsBefore[client])
+	int left = GetEntProp(client, Prop_Send, "m_iAmmo", _, 7) + GetEntProp(tool, Prop_Send, "m_iClip1");
+	Debug("%N: after hammering board %d: %d boards left (had %d), %d boards within 60 / 150 of it: %d / %d", client, b, left, g_buildAmmo[client],
+		0, CountBoardsNear(g_ln_boardPos[b], 60.0), CountBoardsNear(g_ln_boardPos[b], 150.0));
+	if (CountBoardsNear(g_ln_boardPos[b], 60.0) > g_hammerBoardsBefore[client] || left < g_buildAmmo[client])
 	{
 		Debug("%N nailed the main player's board %d", client, b);
 		g_boardClaim[b] = 0;
@@ -1814,6 +1867,7 @@ bool DoBarricade(int client, NavBot bot, float moveGoal[3])
 
 	// 1. Get a barricade tool if we don't have one (dropping heavy items first).
 	int tool = FindOwnedWeapon(client, "weapon_barricade");
+	if (tool != -1) HammerReady(tool);
 	if (g_canAttach == null)
 		return g_furniture.BoolValue ? DoFurniture(client, bot, moveGoal) : false;   // no hammer support
 	if (tool == -1 && !g_needTool.BoolValue && g_furniture.BoolValue)
@@ -2195,6 +2249,84 @@ bool SelfDefence(int client, NavBot bot, int &zombie, float &zdist)
 // ---------------------------------------------------------------------------------------------
 // Main loop
 
+bool TraceWorldOnlyS(int entity, int mask)
+{
+	return entity == 0;
+}
+
+// Floor height straight below a point (or -99999 if nothing within 400 units).
+float FloorAt(const float p[3])
+{
+	float a[3], b[3];
+	a = p; b = p;
+	a[2] += 16.0;
+	b[2] -= 400.0;
+	TR_TraceRayFilter(a, b, MASK_PLAYERSOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnlyS);
+	if (!TR_DidHit())
+		return -99999.0;
+	float hit[3];
+	TR_GetEndPosition(hit);
+	return hit[2];
+}
+
+// Walking from `from` to `to` (and a step past it) runs off a drop: somewhere along the way the
+// floor is more than 64 units below our feet. Roof and balcony edges: bots fell off backing away.
+bool DropAlong(const float from[3], const float to[3])
+{
+	float dir[3];
+	SubtractVectors(to, from, dir);
+	dir[2] = 0.0;
+	float len = GetVectorLength(dir);
+	if (len < 1.0)
+		return false;
+	NormalizeVector(dir, dir);
+	for (float t = 16.0; t <= len + 24.0; t += 16.0)
+	{
+		float p[3];
+		for (int i = 0; i < 2; i++) p[i] = from[i] + dir[i] * t;
+		p[2] = from[2] + 8.0;
+		if (FloorAt(p) < from[2] - 64.0)
+			return true;
+	}
+	return false;
+}
+
+// An unrailed edge within 40 units: nothing solid at step height between us and a drop.
+bool AtEdge(const float pos[3])
+{
+	for (int k = 0; k < 8; k++)
+	{
+		float a = float(k) * 45.0, dir[3], from[3], to[3];
+		dir[0] = Cosine(DegToRad(a)); dir[1] = Sine(DegToRad(a)); dir[2] = 0.0;
+		from = pos; from[2] += 20.0;
+		for (int i = 0; i < 2; i++) to[i] = from[i] + dir[i] * 40.0;
+		to[2] = from[2];
+		TR_TraceHullFilter(from, to, view_as<float>({-8.0, -8.0, 0.0}), view_as<float>({8.0, 8.0, 24.0}), MASK_PLAYERSOLID_BRUSHONLY, TraceWorldOnlyS);
+		if (TR_DidHit())
+			continue;               // a wall or a railing that way
+		if (FloorAt(to) < pos[2] - 64.0)
+			return true;
+	}
+	return false;
+}
+
+// Three or more zombies on top of us: then jumping off is fair.
+bool Surrounded(int client)
+{
+	float me[3], p[3];
+	GetClientAbsOrigin(client, me);
+	int n = 0;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+			continue;
+		GetClientAbsOrigin(i, p);
+		if (GetVectorDistance(me, p) < 160.0)
+			n++;
+	}
+	return n >= 3;
+}
+
 // A walkable spot about 220 units away from a zombie: straight away if that's open, else the
 // direction (up to 90 degrees off) that ends farthest from it. Avoids backing into walls.
 bool RetreatSpot(int client, const float them[3], float out[3])
@@ -2229,6 +2361,8 @@ bool RetreatSpot(int client, const float them[3], float out[3])
 		NavBotNavArea.GetClosestPointOnArea(area, end, spot);
 		if (NearWindow(g_home[client], spot, 100.0))
 			continue;               // don't back into a window
+		if (DropAlong(me, spot) && !Surrounded(client))
+			continue;               // don't back off a roof or balcony
 		float d = GetVectorDistance(spot, them);
 		if (d > best + 40.0)        // prefer the straighter direction unless another is clearly better
 		{
@@ -2349,6 +2483,16 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 			NormalizeVector(away, away);
 			ScaleVector(away, 200.0);
 			AddVectors(me, away, moveGoal);
+		}
+		// Up on a roof or balcony with the way back over the edge: hold here and shoot them below,
+		// unless they're all over us.
+		if (DropAlong(me, moveGoal) && !Surrounded(client))
+		{
+			strcopy(g_state[client], sizeof(g_state[]), "holding the edge, shooting down");
+			NavBotPlayerControllerInterface.AimAtPos(bot.GetPlayerControllerInterface(), them, LOOK_PRIORITY, 0.3, "Shooting down");
+			if (IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
+				NavBotPlayerControllerInterface.PressButtonByID(bot.GetPlayerControllerInterface(), NAVBOT_BUTTON_ATTACKPRIM, 0.1);
+			return Hold(client);
 		}
 		routeType = NAVBOT_FASTEST_ROUTE;
 		strcopy(g_state[client], sizeof(g_state[]), "falling back");
@@ -2856,4 +3000,15 @@ public void OnPluginEnd()
 		if (IsClientInGame(client) && NavBotManager.IsNavBot(client) && g_scripted[client])
 			NavBotManager.GetNavBotByIndex(client).SendPluginCommand(NAVBOT_PLUGINCMD_STOPCMD);
 	}
+}
+
+// A builder's hammer click goes straight into its usercmd.
+public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
+{
+	if (client > 0 && client <= MaxClients && GetGameTime() < g_clickUntil[client] && IsFakeClient(client))
+	{
+		buttons |= IN_ATTACK;
+		return Plugin_Changed;
+	}
+	return Plugin_Continue;
 }

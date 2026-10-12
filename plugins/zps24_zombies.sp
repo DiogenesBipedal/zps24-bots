@@ -910,7 +910,20 @@ bool ChooseEntry(int client, const float target[3])
 			for (int i = 0; i < 3; i++) { out[i] = center[i] + dir[i] * 64.0; inside[i] = center[i] - dir[i] * 64.0; }
 			out[2] = center[2] - 30.0;
 			inside[2] = center[2] - 30.0;
-			if ((Learned_Indoors(out) && GetGameTime() >= g_forceEntryUntil[client]) || !Learned_Indoors(inside))
+			// Outside = not under a roof. A physics door's porch is roofed, though (cabin's front
+			// door): then open sky a little further out counts (a door inside the house has none).
+			bool outsideOk = !Learned_Indoors(out) || GetGameTime() < g_forceEntryUntil[client];
+			if (phys && !outsideOk)
+			{
+				float further[3];
+				for (float step = 120.0; step <= 200.0 && !outsideOk; step += 80.0)
+				{
+					for (int i = 0; i < 3; i++) further[i] = center[i] + dir[i] * (64.0 + step);
+					further[2] = out[2] + 30.0;
+					outsideOk = !Learned_Indoors(further);
+				}
+			}
+			if (!outsideOk || !Learned_Indoors(inside))
 			{
 				if (phys)
 					Debug("%N: physics door %d not a way in (outside roofed %d, inside roofed %d)", client, ent, Learned_Indoors(out), Learned_Indoors(inside));
@@ -1760,6 +1773,40 @@ bool InCrowd(int client)
 // The smashable obstacle or piece of furniture in the way of a stuck zombie: within reach and
 // ahead of it. (Picking the nearest one in any direction had zombies queuing at the church
 // tower's open doorway smash the 3000 hp side door next to it instead.)
+// A window whose glass is already gone: nothing to smash, climb through.
+bool EmptyWindow(int ent)
+{
+	if (!IsValidEntity(ent) || !HasEntProp(ent, Prop_Send, "m_bIsBroken"))
+		return false;
+	char cls[64];
+	GetEntityClassname(ent, cls, sizeof(cls));
+	return StrEqual(cls, "func_breakable_surf") && GetEntProp(ent, Prop_Send, "m_bIsBroken") != 0;
+}
+
+// Ran into a window with no glass: climb straight through it (crouch-jump), like an entrance.
+void ClimbThrough(int client, int win)
+{
+	if (GetGameTime() < g_entryInUntil[client])
+		return;
+	float me[3], c[3], dir[3];
+	GetClientAbsOrigin(client, me);
+	CenterOf(win, c);
+	SubtractVectors(c, me, dir);
+	dir[2] = 0.0;
+	NormalizeVector(dir, dir);
+	for (int i = 0; i < 2; i++)
+	{
+		g_entryOut[client][i] = c[i] - dir[i] * 40.0;
+		g_entryIn[client][i] = c[i] + dir[i] * 60.0;
+	}
+	g_entryOut[client][2] = me[2];
+	g_entryIn[client][2] = me[2];
+	g_entryEnt[client] = EntIndexToEntRef(win);
+	g_entryWindow[client] = true;
+	g_entryInUntil[client] = GetGameTime() + 4.0;
+	Debug("%N: empty window, climbing through", client);
+}
+
 int FindObstacle(int client)
 {
 	float me[3], c[3];
@@ -1769,7 +1816,7 @@ int FindObstacle(int client)
 	float bestDist = 110.0;
 	for (int ent = MaxClients + 1; ent < GetMaxEntities(); ent++)
 	{
-		if (IsIgnored(client, ent) || !(IsSmashable(ent) || (IsValidEntity(ent) && IsFurniture(ent))))
+		if (IsIgnored(client, ent) || !(IsSmashable(ent) || (IsValidEntity(ent) && IsFurniture(ent))) || EmptyWindow(ent))
 			continue;
 		CenterOf(ent, c);
 		float d = GetVectorDistance(me, c);
@@ -2052,6 +2099,11 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 	if (ButtonOnlyDoor(entity))
 	{
 		ForceEntry(client, entity);
+		return Plugin_Handled;
+	}
+	if (EmptyWindow(entity))
+	{
+		ClimbThrough(client, entity);
 		return Plugin_Handled;
 	}
 	// A hinged door isn't physics: shoving does nothing. Open it with E; if it stays shut

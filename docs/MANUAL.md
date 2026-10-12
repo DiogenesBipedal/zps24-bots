@@ -1975,6 +1975,29 @@ it takes a window. The house the survivors use on cabin has `frontdoorwhite` (68
 `backdoor` (801, -116), each held by two 1000 hp planks; the house to the west has
 `newhousedoor1` and `newdoor`.
 
+### 11.20 Why builders never got a board up, and roof edges
+
+**The hammer waits for the game client.** Builders aimed where the teacher aimed, the game's own
+`CanAttachBarricade` said a board fits there, they clicked (even with the click put straight
+into their usercmd through `OnPlayerRunCmd`, one short click like the teacher's recording shows),
+and still no board was used up. The hammer (`CWeapon_Barricade`) has network fields
+`m_bIsSmallBoard` / `m_bIsSmallBoardObtained` / `m_bCanAttachBoard` / `m_bAttachBarricade`, and
+its `ItemPostFrame` tests `m_bIsSmallBoardObtained` (offset 1705, `cmpb $0x0,0x6a9`). A real
+player's client reports the board size and sets it; a bot has no client, so on the bots' hammers it
+stayed 0 and the hammer never got ready. `HammerReady` sets it (large board) on every builder's
+hammer. Also: if `CanAttachBarricade` says no board fits from where the builder stands (the
+teacher may have stood on furniture), the builder sweeps its aim around the teacher's aim point
+(up to 30 units up/down, 20 sideways) until one does; each attempt logs the boards carried
+before and after.
+
+**Roof and balcony edges.** Bots fell off backing away from zombies. `DropAlong` walks the line
+to where the bot wants to go (and a step past it) in 16-unit steps, tracing the floor below; a
+floor more than 64 units under our feet is a drop. Falling back never crosses one: the bot holds
+there and shoots the zombies below ("holding the edge, shooting down"). Only when **surrounded**
+(3+ zombies within 160 units) may it jump. Directions that end in a drop are skipped when looking
+for somewhere to back off to, and defend spots within 40 units of an edge with no railing
+(`AtEdge`: nothing solid at step height, then a drop) are left out unless the teacher held them.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
