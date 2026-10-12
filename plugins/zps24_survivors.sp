@@ -1516,6 +1516,20 @@ bool BreakBasementDoor(int client, NavBot bot)
 		g_breakDoor[client] = INVALID_ENT_REFERENCE;
 		return false;
 	}
+	float c[3], eye[3];
+	EntityCenter(door, c);
+	GetClientEyePosition(client, eye);
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Breaking the basement door");
+	// Shoot it up (the main player: "that's easier"); melee only without a gun.
+	if (IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
+	{
+		if (GetVectorDistance(eye, c) > 400.0)
+			NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
+		else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.1);
+		return true;
+	}
 	int melee = MeleeWeapon(client);
 	int weapon = melee != -1 ? melee : FindOwnedWeapon(client, "weapon_emptyhand");
 	if (weapon != -1 && GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != weapon && GetGameTime() >= g_nextUse[client])
@@ -1525,14 +1539,8 @@ bool BreakBasementDoor(int client, NavBot bot)
 		Format(cmd, sizeof(cmd), "use %s", cls);
 		bot.DelayedFakeClientCommand(cmd);
 		g_nextUse[client] = GetGameTime() + 0.5;
-		g_handsUntil[client] = GetGameTime() + 2.0;   // HoldBestGun: not now
 	}
-	g_handsUntil[client] = GetGameTime() + 2.0;
-	float c[3], eye[3];
-	EntityCenter(door, c);
-	GetClientEyePosition(client, eye);
-	Address ctrl = bot.GetPlayerControllerInterface();
-	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Breaking the basement door");
+	g_handsUntil[client] = GetGameTime() + 2.0;   // HoldBestGun: not now
 	if (GetVectorDistance(eye, c) > 70.0)
 		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
 	else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
@@ -1561,7 +1569,7 @@ int NextBoardLesson(int client)
 			continue;
 		if (GetVectorDistance(g_ln_boardPos[b], g_homePos[h]) > r)
 			continue;
-		if (CountBoardsNear(g_ln_boardPos[b], 40.0) > 0)
+		if (CountBoardsNear(g_ln_boardPos[b], 90.0) > 0)   // already barricaded: ignore it, do another
 			continue;                        // it's up
 		float d = GetVectorDistance(me, g_ln_boardStand[b]);
 		if (d < bestDist) { bestDist = d; best = b; }
@@ -1674,16 +1682,25 @@ bool GetHammer(int client, NavBot bot, float moveGoal[3])
 // The build job: hammer in hand, go where the main player stood, aim where they aimed, hold attack
 // through the whole hammer animation (the board only goes up at its end), check it went up.
 // Returns true while walking to moveGoal.
-// ZPS 2.4's hammer waits for the player's game client to report the board size
-// (m_bIsSmallBoardObtained); a bot has no client, so its hammer never got ready and no board ever
-// went up. Report it for them: the large board.
-void HammerReady(int tool)
+// ZPS 2.4's hammer only nails a board while m_bCanAttachBoard is set, and that flag is kept up to
+// date by the player's game client (it draws the board where it fits). A bot has no client, so
+// its flag stayed 0 and no board ever went up. Set it for them from the game's own fit check.
+// (Logged side by side: the teacher's hammer reads 1 there while aiming at a window; on attack
+// m_bAttachBarricade goes 1 and a board is used up.)
+bool HammerReady(int tool, bool keep = false)
 {
-	if (HasEntProp(tool, Prop_Send, "m_bIsSmallBoardObtained") && !GetEntProp(tool, Prop_Send, "m_bIsSmallBoardObtained"))
+	if (!HasEntProp(tool, Prop_Send, "m_bCanAttachBoard"))
+		return g_canAttach != null && SDKCall(g_canAttach, tool);
+	// Mid-attach (m_bAttachBarricade) the fit check reads "no"; clearing the flag then cancels the
+	// board (seen: 1 0 1 ... then all zeros, no board used). A player's flag stays 1 throughout.
+	if (keep || (HasEntProp(tool, Prop_Send, "m_bAttachBarricade") && GetEntProp(tool, Prop_Send, "m_bAttachBarricade")))
 	{
-		SetEntProp(tool, Prop_Send, "m_bIsSmallBoard", 0);
-		SetEntProp(tool, Prop_Send, "m_bIsSmallBoardObtained", 1);
+		SetEntProp(tool, Prop_Send, "m_bCanAttachBoard", 1);
+		return true;
 	}
+	bool fits = g_canAttach != null && SDKCall(g_canAttach, tool);
+	SetEntProp(tool, Prop_Send, "m_bCanAttachBoard", fits ? 1 : 0);
+	return fits;
 }
 
 bool DoBuild(int client, NavBot bot, float moveGoal[3])
@@ -1691,12 +1708,12 @@ bool DoBuild(int client, NavBot bot, float moveGoal[3])
 	int tool = FindOwnedWeapon(client, "weapon_barricade");
 	if (tool == -1)
 		return GetHammer(client, bot, moveGoal);
-	HammerReady(tool);
+	HammerReady(tool, GetGameTime() < g_hammerUntil[client]);   // hammering: keep it set
 	g_hammerFails[client] = 0;
 	g_spawnedHammer[client] = INVALID_ENT_REFERENCE;
 
 	int b = g_buildLesson[client];
-	if (b < 0 || CountBoardsNear(g_ln_boardPos[b], 40.0) > 0)
+	if (b < 0 || CountBoardsNear(g_ln_boardPos[b], 90.0) > 0)   // that window/door already has boards: another one
 	{
 		if (b >= 0) g_boardClaim[b] = 0;
 		b = NextBoardLesson(client);
@@ -1755,7 +1772,7 @@ bool DoBuild(int client, NavBot bot, float moveGoal[3])
 	{
 		if (!NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
 			return false;
-		if (g_canAttach != null && !SDKCall(g_canAttach, tool))
+		if (g_canAttach != null && !HammerReady(tool))
 		{
 			if (++g_buildScan[client] % sizeof(offs) == 0)
 			{

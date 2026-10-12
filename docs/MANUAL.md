@@ -1975,20 +1975,29 @@ it takes a window. The house the survivors use on cabin has `frontdoorwhite` (68
 `backdoor` (801, -116), each held by two 1000 hp planks; the house to the west has
 `newhousedoor1` and `newdoor`.
 
-### 11.20 Why builders never got a board up, and roof edges
+### 11.20 Why builders never got a board up, roof edges, church basement
 
 **The hammer waits for the game client.** Builders aimed where the teacher aimed, the game's own
-`CanAttachBarricade` said a board fits there, they clicked (even with the click put straight
-into their usercmd through `OnPlayerRunCmd`, one short click like the teacher's recording shows),
-and still no board was used up. The hammer (`CWeapon_Barricade`) has network fields
-`m_bIsSmallBoard` / `m_bIsSmallBoardObtained` / `m_bCanAttachBoard` / `m_bAttachBarricade`, and
-its `ItemPostFrame` tests `m_bIsSmallBoardObtained` (offset 1705, `cmpb $0x0,0x6a9`). A real
-player's client reports the board size and sets it; a bot has no client, so on the bots' hammers it
-stayed 0 and the hammer never got ready. `HammerReady` sets it (large board) on every builder's
-hammer. Also: if `CanAttachBarricade` says no board fits from where the builder stands (the
-teacher may have stood on furniture), the builder sweeps its aim around the teacher's aim point
-(up to 30 units up/down, 20 sideways) until one does; each attempt logs the boards carried
-before and after.
+`CanAttachBarricade` said a board fits there, they clicked (one short click, like the teacher's
+recording, put straight into their usercmd through `OnPlayerRunCmd`), and still no board was
+used up. The hammer's state, logged byte by byte (offsets 1700-1708) for the teacher and a bot
+side by side, showed why:
+
+| | idle, aiming at a window | click | after |
+|---|---|---|---|
+| teacher | `0 0 0 0 0 0 1 0 0` | `1 0 1 0 0 0 1 0 0` | board used (3 -> 2) |
+| bot | `0 0 0 0 0 0 0 0 0` | nothing | 7 stays 7 |
+
+Offset 1706 is `m_bCanAttachBoard`: the player's game client keeps it at 1 while the board
+"ghost" fits where they aim, and the server only starts nailing when it's 1. A bot has no
+client. `HammerReady` sets it from the game's own fit check (`CanAttachBarricade`). One more
+catch, also from the log: the bot then got as far as `1 0 1 ...` (attach started) and dropped
+back to zeros, because mid-attach the fit check reads "no" and the flag got cleared, cancelling
+the board. It now stays 1 while `m_bAttachBarricade` is set and while the builder is hammering.
+(A first guess, `m_bIsSmallBoardObtained`, was wrong: it's 0 on the teacher's hammer too.)
+If no board fits from where the builder stands (the teacher may have stood on furniture), it
+sweeps its aim around the teacher's aim point (up to 30 units up/down, 20 sideways) until one does.
+A window or door that already has boards within 90 units is skipped: barricade another one.
 
 **Roof and balcony edges.** Bots fell off backing away from zombies. `DropAlong` walks the line
 to where the bot wants to go (and a step past it) in 16-unit steps, tracing the floor below; a
@@ -1997,6 +2006,11 @@ there and shoots the zombies below ("holding the edge, shooting down"). Only whe
 (3+ zombies within 160 units) may it jump. Directions that end in a drop are skipped when looking
 for somewhere to back off to, and defend spots within 40 units of an edge with no railing
 (`AtEdge`: nothing solid at step height, then a drop) are left out unless the teacher held them.
+
+**Church basement.** Survivors leave it alone: church has `"prefer" "up"` in
+`configs/zps24_maps.cfg`, so no hold or patrol spots below the ground floor. When a survivor's
+path does run into the basement door, it shoots it open with its gun from up to 400 units away
+(the teacher: "just shoot it up, that's easier"); melee, walking up to it, only without a gun.
 
 ## 12. The Windows port
 
