@@ -1836,6 +1836,24 @@ logic steers to the way out (the teacher's route within 4000 units, else the nea
 Removed: 2300-5400 connections per lake map (the command handles 4096 per run, so run it again
 until it reports 0).
 
+**Ways out that lead nowhere.** With no connections into water, a strip of bank whose only
+connections had gone into the lake became a dead end. Zombies climbed onto it, had no path, and
+wandered back in. Now the plugin labels the **dry regions** (dry areas joined by connections
+between dry areas, `LabelDry`), and a way out only counts if it leads into the region of the
+survivor being hunted. A zombie stranded on a small dry region (under 60 areas) that isn't the
+survivors' region goes back in and out again at a real way out. Other rules on the way:
+
+- once a way out is picked, the zombie keeps heading there until it stands on dry ground there or
+  time runs out (it used to re-pick on every tick and never commit);
+- banks: aim at the middle of the bank's area, not the water's edge (from the edge NavBot still
+  thought it was in the lake and slid back), and only banks at most 45 units above the zombie
+  (climbable);
+- a way out that fails is skipped for 40 s.
+
+Still weak: on zpo_lake_of_the_dead most of the shore is too high to climb, and the teacher's
+route is the only real way out. **Swimming out once as a zombie at other spots teaches more
+ways out**; each learned route that starts in the water and ends on the survivors' land is used.
+
 `sm_contents x y z` prints the brush contents at a point (`WATER` or not), to check what counts
 as water.
 

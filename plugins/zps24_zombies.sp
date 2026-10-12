@@ -99,6 +99,11 @@ bool  g_brOpen[BR_MAX];                // cleared and linked into the nav mesh
 // part of the map they can't walk to (behind a plank, a barred door, a window).
 #define COMP_MAX_ID 8192
 int g_comp[COMP_MAX_ID];
+// Dry land regions: dry areas joined by connections between dry areas (water areas excluded).
+// A way out of a lake only helps if it leads onto the survivors' region, not onto a strip of bank
+// whose only connections went back into the water.
+int g_dry[COMP_MAX_ID];                // union-find parent; -1 = water area / none
+int g_drySize[COMP_MAX_ID];
 
 // Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
 // staging point out of their sight, then rush together.
@@ -106,6 +111,8 @@ ConVar g_waves;
 bool  g_swimExit[MAXPLAYERS + 1];      // steering out of the water onto g_swimExitPos
 float g_swimExitPos[MAXPLAYERS + 1][3];
 float g_swimUntil[MAXPLAYERS + 1];
+float g_swimBan[MAXPLAYERS + 1][3];    // a way out that just failed
+float g_swimBanUntil[MAXPLAYERS + 1];
 int   g_swimRoute[MAXPLAYERS + 1] = { -1, ... };   // learned route out of the water being followed
 int   g_swimStep[MAXPLAYERS + 1];
 int   g_stopTries[MAXPLAYERS + 1];
@@ -331,6 +338,11 @@ int UpdateHorde(int client, const float me[3], const float target[3], bool sees,
 	return ENTRY_PATH;
 }
 
+bool Banned(int client, const float pos[3])
+{
+	return GetGameTime() < g_swimBanUntil[client] && GetVectorDistance(pos, g_swimBan[client]) < 150.0;
+}
+
 // Is the nav area under us a water area (its middle in water)? Puddles on dry ground aren't.
 bool StandingInWater(int client)
 {
@@ -359,7 +371,42 @@ bool UpdateSwim(int client, NavBot bot)
 	int level = WaterLevel(client);
 	if (level == 1 && !g_swimExit[client] && StandingInWater(client))
 		level = 2;                  // wading in the lake's shallows: get out all the same
-	bool onRoute = g_swimExit[client] && g_swimRoute[client] != -1 && GetGameTime() < g_swimUntil[client];
+	// The survivors' dry region: a way out must lead there.
+	int want = -1;
+	{
+		int t = IsLiveSurvivor(g_target[client]) ? g_target[client] : PickTarget(client);
+		if (t > 0)
+		{
+			float tp[3];
+			GetClientAbsOrigin(t, tp);
+			want = DryCompAt(tp);
+		}
+	}
+	float me0[3];
+	GetClientAbsOrigin(client, me0);
+	if (level < 2 && !g_swimExit[client] && want != -1)
+	{
+		// Stranded on a bit of dry bank that doesn't connect to the survivors (its connections
+		// all led into the water): back in and out again at a real way out.
+		int mine = DryCompAt(me0);
+		if (mine != -1 && mine != want && g_drySize[mine] < 60)
+			level = 2;
+	}
+	// Heading for a way out: keep at it until we're there (or time's up), however deep the water.
+	bool onRoute = g_swimExit[client] && GetGameTime() < g_swimUntil[client];
+	if (onRoute && g_swimRoute[client] == -1 && WaterLevel(client) == 0 && !StandingInWater(client))
+	{
+		float here[3], flat[3];
+		GetClientAbsOrigin(client, here);
+		flat = g_swimExitPos[client];
+		flat[2] = here[2];
+		if (GetVectorDistance(here, flat) < 60.0)
+		{
+			Debug("%N is out of the water (bank)", client);
+			g_swimExit[client] = false;
+			return false;
+		}
+	}
 	if (level < 2 && !onRoute)
 	{
 		g_swimExit[client] = false;
@@ -389,6 +436,8 @@ bool UpdateSwim(int client, NavBot bot)
 			dry[2] += 16.0;
 			if (!(TR_GetPointContents(w) & MASK_WATER) || (TR_GetPointContents(dry) & MASK_WATER))
 				continue;
+			if ((want != -1 && DryCompAt(g_ln_routes[r][last]) != want) || Banned(client, g_ln_routes[r][0]))
+				continue;              // doesn't lead to the survivors, or failed just now
 			float flat[3];
 			flat = g_ln_routes[r][0];
 			flat[2] = me[2];
@@ -404,19 +453,34 @@ bool UpdateSwim(int client, NavBot bot)
 			float lo[3], hi[3];
 			for (int i = 0; i < 3; i++) { lo[i] = me[i] - 1500.0; hi[i] = me[i] + 1500.0; }
 			lo[2] = me[2] - 40.0;
-			hi[2] = me[2] + 60.0;
+			hi[2] = me[2] + 45.0;
 			NavBotNavAreaVector v = NavBotNavMesh.CollectAreasOverlappingExtent(lo, hi);
 			for (int i = 0; i < v.Size; i++)
 			{
 				float p[3];
 				NavBotNavArea.GetClosestPointOnArea(v.At(i), me, p);
-				if (p[2] < me[2] - 40.0 || p[2] > me[2] + 60.0)
+				if (p[2] < me[2] - 40.0 || p[2] > me[2] + 45.0)   // low enough to climb out onto
 					continue;
 				p[2] += 4.0;
 				if (TR_GetPointContents(p) & MASK_WATER)
 					continue;          // still in the water
+				if (Banned(client, p))
+					continue;
+				int pid = NavBotNavArea.GetID(v.At(i));
+				if (want != -1 && (pid < 0 || pid >= COMP_MAX_ID || g_dry[pid] == -1 || DryRoot(pid) != want))
+					continue;          // a strip of bank that leads nowhere
 				float d = GetVectorDistance(me, p);
-				if (d < 1500.0 && d + 400.0 < routeDist && d < bestDist) { bestDist = d; best = p; route = -1; }
+				if (d < 1500.0 && d + 400.0 < routeDist && d < bestDist)
+				{
+					// Aim for the middle of the bank's area, well clear of the water's edge, so
+					// NavBot takes over on dry ground (the edge itself slid us back in).
+					float c[3];
+					NavBotNavArea.GetCenter(v.At(i), c);
+					c[2] += 4.0;
+					bestDist = d;
+					best = (TR_GetPointContents(c) & MASK_WATER) ? p : c;
+					route = -1;
+				}
 			}
 			delete v;
 			g_swimRoute[client] = route;
@@ -425,12 +489,16 @@ bool UpdateSwim(int client, NavBot bot)
 		}
 		g_swimExitPos[client] = best;
 		g_swimExit[client] = true;
-		g_swimUntil[client] = GetGameTime() + (route != -1 ? 12.0 + bestDist / 150.0 : 10.0);
+		g_swimUntil[client] = GetGameTime() + (route != -1 ? 12.0 + bestDist / 150.0 : 4.0 + bestDist / 150.0);
 		Debug("%N climbing out of the water at %.0f %.0f %.0f (%s, from %.0f %.0f %.0f water %d)", client, best[0], best[1], best[2],
 			route != -1 ? "the main player's way out" : "bank", me[0], me[1], me[2], level);
 	}
 	if (GetGameTime() > g_swimUntil[client])
 	{
+		// Didn't make it: don't pick that way out again for a while.
+		g_swimBan[client] = g_swimExitPos[client];
+		g_swimBanUntil[client] = GetGameTime() + 40.0;
+		Debug("%N couldn't get out at %.0f %.0f %.0f, trying elsewhere", client, g_swimExitPos[client][0], g_swimExitPos[client][1], g_swimExitPos[client][2]);
 		g_swimExit[client] = false;
 		return false;
 	}
@@ -1769,8 +1837,77 @@ int AreaComp(Address a)
 	return id >= 0 && id < COMP_MAX_ID ? g_comp[id] : -1;
 }
 
+bool AreaWet(Address a)
+{
+	float c[3];
+	NavBotNavArea.GetCenter(a, c);
+	c[2] += 16.0;
+	return (TR_GetPointContents(c) & MASK_WATER) != 0;
+}
+
+int DryRoot(int id)
+{
+	while (g_dry[id] != id)
+	{
+		g_dry[id] = g_dry[g_dry[id]];
+		id = g_dry[id];
+	}
+	return id;
+}
+
+void LabelDry()
+{
+	for (int i = 0; i < COMP_MAX_ID; i++) { g_dry[i] = -1; g_drySize[i] = 0; }
+	float lo[3] = { -32768.0, -32768.0, -32768.0 }, hi[3] = { 32768.0, 32768.0, 32768.0 };
+	NavBotNavAreaVector all = NavBotNavMesh.CollectAreasOverlappingExtent(lo, hi);
+	for (int i = 0; i < all.Size; i++)
+	{
+		int id = NavBotNavArea.GetID(all.At(i));
+		if (id >= 0 && id < COMP_MAX_ID && !AreaWet(all.At(i)))
+			g_dry[id] = id;
+	}
+	for (int i = 0; i < all.Size; i++)
+	{
+		Address a = all.At(i);
+		int id = NavBotNavArea.GetID(a);
+		if (id < 0 || id >= COMP_MAX_ID || g_dry[id] == -1)
+			continue;
+		for (int d = 0; d < 4; d++)
+		{
+			int n = NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
+			for (int k = 0; k < n; k++)
+			{
+				Address b = NavBotNavArea.GetAdjacentArea(a, view_as<NavBotNavDirType>(d), k);
+				int bid = b != Address_Null ? NavBotNavArea.GetID(b) : -1;
+				if (bid < 0 || bid >= COMP_MAX_ID || g_dry[bid] == -1)
+					continue;
+				int ra = DryRoot(id), rb = DryRoot(bid);
+				if (ra != rb) g_dry[ra] = rb;
+			}
+		}
+	}
+	for (int i = 0; i < all.Size; i++)
+	{
+		int id = NavBotNavArea.GetID(all.At(i));
+		if (id >= 0 && id < COMP_MAX_ID && g_dry[id] != -1)
+			g_drySize[DryRoot(id)]++;
+	}
+	delete all;
+}
+
+// Dry region at a spot (-1: water, or no nav area there).
+int DryCompAt(const float pos[3])
+{
+	Address a = NavBotNavMesh.GetNearestNavArea(pos, 200.0, false, true);
+	int id = a != Address_Null ? NavBotNavArea.GetID(a) : -1;
+	if (id < 0 || id >= COMP_MAX_ID || g_dry[id] == -1)
+		return -1;
+	return DryRoot(id);
+}
+
 void LabelRegions()
 {
+	LabelDry();
 	for (int i = 0; i < COMP_MAX_ID; i++)
 		g_comp[i] = -1;
 	float lo[3] = { -32768.0, -32768.0, -32768.0 }, hi[3] = { 32768.0, 32768.0, 32768.0 };
