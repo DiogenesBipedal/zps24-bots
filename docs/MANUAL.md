@@ -1775,6 +1775,16 @@ zombies came in one by one, each walking into a dozen guns. Two changes in zps24
 Debug (`sm_zps24zombies_debug 1`, in server.log): "Horde: gathering at ..." and
 "Horde: CHARGE with N of M zombies".
 
+**Zombies that never attacked (zpo_lake_of_the_dead).** After a map change, every zombie was
+roaming on NavBot's default behaviour and nobody got attacked. The plugin's think timer was
+running, but its "is our script running?" check trusted NavBot's "plugin command running" flag.
+That flag was still set while the bot was plainly not running a script, so the plugin kept
+sending "stop" and never started its own. `sm_zps24zombies_status` (new: horde state, then every
+zombie bot with its target, goal and current NavBot task) showed `scripted 0` and
+`MainTask(Tactical(Scenario(ObjectiveZombie)))`, with no `ScriptedBehavior`. Now the check reads
+the bot's task string. No `ScriptedBehavior` means the script isn't running, and after 4
+unanswered stops the plugin starts it regardless.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

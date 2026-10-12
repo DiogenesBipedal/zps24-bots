@@ -103,6 +103,7 @@ int g_comp[COMP_MAX_ID];
 // Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
 // staging point out of their sight, then rush together.
 ConVar g_waves;
+int   g_stopTries[MAXPLAYERS + 1];
 #define ENTRY_NONE  0
 #define ENTRY_PATH  1      // moveGoal set: path there
 #define ENTRY_STEER 2      // steering the bot ourselves (no pathing)
@@ -121,6 +122,7 @@ public void OnPluginStart()
 	g_buildSteps = CreateConVar("sm_zps24zombies_build_steps", "0", "Zombie bots push furniture the main player moved as a zombie into place (steps up to roofs)");
 	g_waves = CreateConVar("sm_zps24zombies_waves", "1", "Zombie bots gather into a horde before rushing survivors holding out together");
 	g_forceTarget = CreateConVar("sm_zps24zombies_force_target", "0", "Debug: every zombie hunts this client index (0 = normal)");
+	RegServerCmd("sm_zps24zombies_status", Cmd_Status, "Horde state and what each zombie bot is hunting");
 	RegServerCmd("sm_zps24_doorbars", Cmd_DoorBars, "List physics props right next to doors (planks barring them)");
 	RegServerCmd("sm_zps24_doorlinks", Cmd_DoorLinks, "Connect the nav areas on both sides of every door again and report");
 	AutoExecConfig(true, "zps24_zombies");
@@ -1930,18 +1932,30 @@ Action Timer_Think(Handle timer)
 			}
 		}
 
-		if (!g_scripted[client] || !NavBotBehaviorInterface.IsRunningPluginCommand(bot.GetBehaviorInterface()))
+		// Is our script really running? Check the bot's behaviour itself, not only the flags: after
+		// a map change zombies were left on NavBot's default roaming with the "command running"
+		// flag still set, and never got the script back.
+		char task[160];
+		NavBotBehaviorInterface.GetTaskDebugString(bot.GetBehaviorInterface(), task, sizeof(task));
+		bool running = StrContains(task, "ScriptedBehavior") != -1;
+		if (!g_scripted[client] || !running)
 		{
 			// A scripted task left over from a previous load of this plugin would keep calling a
-			// dead callback and leave the bot idle. Stop whatever is running, then start ours.
-			if (NavBotBehaviorInterface.IsRunningPluginCommand(bot.GetBehaviorInterface()))
+			// dead callback and leave the bot idle. Stop whatever is running, then start ours
+			// (a few tries, then start ours regardless).
+			if (NavBotBehaviorInterface.IsRunningPluginCommand(bot.GetBehaviorInterface()) && ++g_stopTries[client] <= 4)
 			{
 				bot.SendPluginCommand(NAVBOT_PLUGINCMD_STOPCMD);
 				continue;   // start ours on the next tick
 			}
+			if (g_scripted[client])
+				Debug("%N lost its script (%s): restarting it", client, task);
+			g_stopTries[client] = 0;
 			bot.SendScriptedPluginCommand(OnScriptedUpdate);
 			g_scripted[client] = true;
 		}
+		else
+			g_stopTries[client] = 0;
 	}
 	return Plugin_Continue;
 }
@@ -1956,4 +1970,25 @@ public void OnPluginEnd()
 		if (IsClientInGame(client) && NavBotManager.IsNavBot(client) && g_scripted[client])
 			NavBotManager.GetNavBotByIndex(client).SendPluginCommand(NAVBOT_PLUGINCMD_STOPCMD);
 	}
+}
+
+Action Cmd_Status(int args)
+{
+	PrintToServer("[zps24zombies] horde: %s%s, stage %.0f %.0f %.0f, %.0f s in this phase", g_waveState == WAVE_GATHER ? "GATHER" : "CHARGE",
+		g_waves.BoolValue ? "" : " (waves off)", g_stagePos[0], g_stagePos[1], g_stagePos[2], GetGameTime() - g_waveSince);
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsFakeClient(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+			continue;
+		float me[3], t[3];
+		GetClientAbsOrigin(i, me);
+		char task[160] = "-";
+		if (NavBotManager.IsNavBot(i))
+			NavBotBehaviorInterface.GetTaskDebugString(NavBotManager.GetNavBotByIndex(i).GetBehaviorInterface(), task, sizeof(task));
+		int tg = g_target[i];
+		if (IsLiveSurvivor(tg)) GetClientAbsOrigin(tg, t);
+		PrintToServer("%N at %.0f %.0f %.0f scripted %d -> target %d (%.0f away) goal %.0f %.0f %.0f stuck %.0f s | %s", i, me[0], me[1], me[2], g_scripted[i],
+			tg, IsLiveSurvivor(tg) ? GetVectorDistance(me, t) : -1.0, g_goal[i][0], g_goal[i][1], g_goal[i][2], Unstick_StuckFor(i), task);
+	}
+	return Plugin_Handled;
 }
