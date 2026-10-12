@@ -5,6 +5,9 @@
 //   sm_navseed x y z                 add a walkable seed for sm_nav_generate_incremental
 //   sm_floormap x1 y1 x2 y2 ztop step   floor heights on a grid (downward traces from ztop, player
 //                                    hull), to see stairs and steps the mesh should cover
+//   sm_navfixdrops [apply]           drop-down connections a player can't actually take (a railing
+//                                    or glass on the ledge): list them, or with "apply" remove them
+//                                    (then sm_nav_save to keep the fixed mesh)
 #include <sourcemod>
 #include <sdktools>
 #include <navbot>
@@ -24,6 +27,7 @@ public void OnPluginStart()
 	RegServerCmd("sm_navtp", Cmd_NavTp, "sm_navtp client x y z [freeze 0/1]: move a player, optionally pin them there");
 	RegServerCmd("sm_where", Cmd_Where, "sm_where team: positions of a team's living players");
 	RegServerCmd("sm_navreach", Cmd_NavReach, "sm_navreach x y z x1 y1 z1 x2 y2 z2: which areas in the box are reachable from the area at x y z");
+	RegServerCmd("sm_navfixdrops", Cmd_NavFixDrops, "sm_navfixdrops [apply]: find (and remove) drop-down connections blocked by railings");
 	RegServerCmd("sm_navseed", Cmd_NavSeed, "sm_navseed x y z: add a walkable seed for (incremental) nav generation");
 }
 
@@ -198,5 +202,82 @@ Action Cmd_FloorMap(int args)
 		}
 		PrintToServer("%s", line);
 	}
+	return Plugin_Handled;
+}
+
+bool TraceNoPlayers(int entity, int mask)
+{
+	return entity > MaxClients;
+}
+
+// Can a standing player get from area a's ledge over to area b below and drop onto it?
+// Walk off the ledge (hull at step height, so a railing or window glass blocks it), then fall.
+bool DropBlocked(Address a, Address b)
+{
+	float ca[3], cb[3], pa[3], pb[3], above[3];
+	NavBotNavArea.GetCenter(a, ca);
+	NavBotNavArea.GetCenter(b, cb);
+	NavBotNavArea.GetClosestPointOnArea(a, cb, pa);
+	NavBotNavArea.GetClosestPointOnArea(b, pa, pb);
+	float mins[3] = { -16.0, -16.0, 0.0 }, maxs[3] = { 16.0, 16.0, 54.0 };
+	// a little past the ledge, toward b
+	float dir[3];
+	SubtractVectors(pb, pa, dir);
+	dir[2] = 0.0;
+	NormalizeVector(dir, dir);
+	ScaleVector(dir, 34.0);
+	float from[3];
+	from = pa;
+	from[2] += 18.0;
+	above = pb;
+	AddVectors(above, dir, above);
+	above[2] = from[2];
+	TR_TraceHullFilter(from, above, mins, maxs, MASK_PLAYERSOLID, TraceNoPlayers);
+	if (TR_DidHit())
+		return true;
+	float down[3];
+	down = above;
+	down[2] = pb[2] + 4.0;
+	TR_TraceHullFilter(above, down, mins, maxs, MASK_PLAYERSOLID, TraceNoPlayers);
+	return TR_DidHit() && TR_GetFraction() < 0.9;
+}
+
+Action Cmd_NavFixDrops(int args)
+{
+	char arg[16];
+	GetCmdArg(1, arg, sizeof(arg));
+	bool apply = StrEqual(arg, "apply");
+	float mins[3] = { -32768.0, -32768.0, -32768.0 }, maxs[3] = { 32768.0, 32768.0, 32768.0 };
+	NavBotNavAreaVector v = NavBotNavMesh.CollectAreasOverlappingExtent(mins, maxs);
+	int found = 0;
+	static Address fromA[2048], toB[2048];
+	for (int i = 0; i < v.Size; i++)
+	{
+		Address a = v.At(i);
+		for (int d = 0; d < 4; d++)
+		{
+			int n = NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
+			for (int k = 0; k < n; k++)
+			{
+				Address b = NavBotNavArea.GetAdjacentArea(a, view_as<NavBotNavDirType>(d), k);
+				float dz = NavBotNavArea.ComputeAdjacentConnectionHeightChange(a, b);
+				if (dz > -60.0 || !DropBlocked(a, b) || found >= sizeof(fromA))
+					continue;
+				float ca[3], cb[3];
+				NavBotNavArea.GetCenter(a, ca);
+				NavBotNavArea.GetCenter(b, cb);
+				PrintToServer("[navfixdrops] #%d (%.0f %.0f %.0f) -> #%d (%.0f %.0f %.0f) drop %.0f: blocked", NavBotNavArea.GetID(a), ca[0], ca[1], ca[2],
+					NavBotNavArea.GetID(b), cb[0], cb[1], cb[2], -dz);
+				fromA[found] = a;
+				toB[found] = b;
+				found++;
+			}
+		}
+	}
+	delete v;
+	if (apply)
+		for (int i = 0; i < found; i++)
+			NavBotNavArea.DisconnectFromAdjacent(fromA[i], toB[i]);
+	PrintToServer("[navfixdrops] %d blocked drop-down connections%s", found, apply ? " removed (sm_nav_save to keep)" : " (sm_navfixdrops apply to remove)");
 	return Plugin_Handled;
 }

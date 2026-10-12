@@ -1728,6 +1728,34 @@ How to test a map without disturbing the game: `zps24-test-server.sh start <map>
 `zps24-test-server.sh cmd status`. If no `map :` line comes back, it crashed. To see where, run
 the same srcds command under `gdb -batch -ex run -ex bt`.
 
+### 11.15 zps_cinema: spread out and patrol, and the balcony drops
+
+**Spread and patrol.** Two new per-map keys in `configs/zps24_maps.cfg`:
+
+- `"spread" "1"`: defend spots all over the building. Every floor counts the same (no
+  upper-floor bonus), indoors only, never next to a window, and at least 220 units apart instead
+  of 96, so 16-32 spots cover the whole cinema.
+- `"patrol" "0.5"`: half the survivor bots (picked by client index, so the same ones all round)
+  are patrollers. A patroller walks to a free spot 250-1500 units away (another room or floor),
+  looks around there for 5-12 s, then moves on. The others hold a spot for 25-45 s as before.
+  Nobody moves on while a zombie is within 900 units.
+
+`sm_zps24ai_bots` now shows each bot's spot (`-> spot N (x y z)`, `patrol` for patrollers).
+
+**"All stuck on the upper floor".** With spots on every floor, bots on the upper floor had to get
+downstairs. The generated mesh had "drop down" connections from the balcony edge to the hall
+167-176 units below, and the pathfinder took them as the shortcut. But a railing stands on that
+edge: the bots walked into it and stayed there. Found with `sm_navdump` (the `dz -168 gap 25`
+connections).
+
+`sm_navfixdrops` (zps24_navdebug) checks every drop-down connection (more than 60 units down)
+for any map. It sweeps a player hull off the ledge at step height (a railing or glass blocks it),
+then down onto the lower area. `sm_navfixdrops` lists the blocked ones and `sm_navfixdrops apply`
+removes them. Then `sv_cheats 1; sm_nav_save; sv_cheats 0` writes the fixed mesh. On zps_cinema
+it found 16: the 12 balcony drops and 4 small ledges outside. Bots now use the stairs.
+
+Removing connections at runtime kicks every bot; the quota adds them back within seconds.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

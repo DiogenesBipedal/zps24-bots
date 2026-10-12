@@ -115,6 +115,9 @@ float g_mapHomePos[3];
 float g_mapRadius;                       // 0 = sm_zps24ai_holdout_radius
 float g_mapGround;                       // street level heights are measured from
 bool  g_mapPreferUp;
+bool  g_mapSpread;                        // spots all over the building, every floor, far apart
+float g_mapPatrol;                        // share of the bots that patrol between spots (0-1)
+bool  g_patrolArrived[MAXPLAYERS + 1];
 int   g_badHoldoutCount;
 
 // Per-bot state
@@ -214,6 +217,8 @@ void LoadMapConfig()
 	g_mapHome = false;
 	g_mapRadius = 0.0;
 	g_mapPreferUp = false;
+	g_mapSpread = false;
+	g_mapPatrol = 0.0;
 	char path[PLATFORM_MAX_PATH], map[64];
 	BuildPath(Path_SM, path, sizeof(path), "configs/zps24_maps.cfg");
 	GetCurrentMap(map, sizeof(map));
@@ -228,6 +233,8 @@ void LoadMapConfig()
 		char prefer[16];
 		kv.GetString("prefer", prefer, sizeof(prefer), "both");
 		g_mapPreferUp = StrEqual(prefer, "up");
+		g_mapSpread = kv.GetNum("spread", 0) != 0;
+		g_mapPatrol = kv.GetFloat("patrol", 0.0);
 		if (g_mapHome)
 			LogMessage("%s: survivors hold out at %.0f %.0f %.0f (from configs/zps24_maps.cfg)", map, g_mapHomePos[0], g_mapHomePos[1], g_mapHomePos[2]);
 	}
@@ -540,6 +547,7 @@ void AssignHome(int client)
 	g_home[client] = best;
 	g_defendIdx[client] = GetRandomInt(0, 7);
 	g_defendSwitch[client] = 0.0;
+	g_patrolArrived[client] = false;
 	Debug("%N defends home %d", client, best);
 }
 
@@ -707,7 +715,8 @@ int BuildDefendSpots(int h, Address start)
 			neighbours += NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
 		// Off the ground floor (up or down) dominates; few neighbours (a corner) breaks ties; stay
 		// fairly close; never next to a window; indoors only, unless there's hardly any indoors.
-		scores[i] = (height >= g_upperHeight.FloatValue ? 1000.0 + (height > 400.0 ? 400.0 : height) : 0.0)
+		scores[i] = (g_mapSpread ? GetRandomFloat(0.0, 300.0)   // spread: every floor counts the same
+				: (height >= g_upperHeight.FloatValue ? 1000.0 + (height > 400.0 ? 400.0 : height) : 0.0))
 			+ (neighbours <= 2 ? 200.0 : 0.0)
 			- GetVectorDistance(centers[i], g_homePos[h]) * 0.1
 			- (NearWindow(h, centers[i], 150.0) ? 5000.0 : 0.0)
@@ -744,7 +753,9 @@ int BuildDefendSpots(int h, Address start)
 	}
 	int learned = g_defendCount[h];
 
-	// Then the best of the rest, at least 96 units apart so bots don't stack.
+	// Then the best of the rest, at least 96 units apart so bots don't stack (spread: 220, so
+	// the spots cover the whole building).
+	float apart = g_mapSpread ? 220.0 : 96.0;
 	bool used[512];
 	while (g_defendCount[h] < MAX_DEFEND)
 	{
@@ -755,7 +766,7 @@ int BuildDefendSpots(int h, Address start)
 				continue;
 			bool tooClose = false;
 			for (int k = 0; k < g_defendCount[h]; k++)
-				if (GetVectorDistance(centers[i], g_defendPos[h][k]) < 96.0) { tooClose = true; break; }
+				if (GetVectorDistance(centers[i], g_defendPos[h][k]) < apart) { tooClose = true; break; }
 			if (!tooClose)
 				best = i;
 		}
@@ -2329,12 +2340,20 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	{
 		float zd;
 		bool calm = NearestZombie(client, 900.0, zd) == 0;
-		if (GetGameTime() >= g_defendSwitch[client] && calm)
+		if (IsPatroller(client) && GetGameTime() >= g_defendSwitch[client] && calm)
+		{
+			// Patrol: walk to another spot somewhere else in the building, look around a few
+			// seconds there, move on.
+			g_defendIdx[client] = PickPatrolSpot(client, h);
+			g_defendSwitch[client] = GetGameTime() + 90.0;   // until we get there
+			g_patrolArrived[client] = false;
+		}
+		else if (GetGameTime() >= g_defendSwitch[client] && calm)
 		{
 			// Upstairs whenever the building has an upper floor, roof or balcony.
-			int top = g_upperCount[h] > 0 ? g_upperCount[h] : g_defendCount[h];
+			int top = g_upperCount[h] > 0 && !g_mapSpread ? g_upperCount[h] : g_defendCount[h];
 			if (top < 4) top = g_defendCount[h] < 4 ? g_defendCount[h] : 4;   // don't all pile onto one spot
-			if (top > 16) top = 16;
+			if (top > 16 && !g_mapSpread) top = 16;
 			g_defendIdx[client] = PickFreeSpot(client, h, top);
 			g_defendSwitch[client] = GetGameTime() + GetRandomFloat(25.0, 45.0);
 		}
@@ -2354,6 +2373,12 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		routeType = NAVBOT_SAFEST_ROUTE;
 		strcopy(g_state[client], sizeof(g_state[]), "walking to defend spot");
 		return MoveTo(client, moveGoal);
+	}
+	if (IsPatroller(client) && !g_patrolArrived[client])
+	{
+		g_patrolArrived[client] = true;
+		g_defendSwitch[client] = GetGameTime() + GetRandomFloat(5.0, 12.0);
+		g_lookAround[client] = 0.0;
 	}
 	// Holding one of the main player's spots: copy how they held it (crouched or not) and where
 	// they watched from it.
@@ -2386,6 +2411,34 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 	strcopy(g_state[client], sizeof(g_state[]), "holding defend spot");
 	return Hold(client);
+}
+
+// Maps with "patrol" in zps24_maps.cfg: this share of the survivor bots (picked by client index,
+// so the same bots all round) walks from spot to spot instead of holding one.
+bool IsPatroller(int client)
+{
+	return g_mapPatrol > 0.0 && float((client * 37) % 100) < g_mapPatrol * 100.0;
+}
+
+// Next patrol stop: a free spot 250-1500 units from where we are (another room or floor), so the
+// patrol covers the building; any free spot if none is that far.
+int PickPatrolSpot(int client, int h)
+{
+	float me[3];
+	GetClientAbsOrigin(client, me);
+	int pick[MAX_DEFEND], n = 0;
+	for (int i = 0; i < g_defendCount[h]; i++)
+	{
+		float d = GetVectorDistance(me, g_defendPos[h][i]);
+		if (d < 250.0 || d > 1500.0)
+			continue;
+		bool taken = false;
+		for (int o = 1; o <= MaxClients && !taken; o++)
+			taken = o != client && g_home[o] == h && g_defendIdx[o] % g_defendCount[h] == i && IsClientInGame(o) && IsPlayerAlive(o);
+		if (!taken)
+			pick[n++] = i;
+	}
+	return n > 0 ? pick[GetRandomInt(0, n - 1)] : PickFreeSpot(client, h, g_defendCount[h]);
 }
 
 // A random one of the home's best `top` spots that no other bot of the home holds, so they spread
@@ -2629,9 +2682,16 @@ Action Cmd_Bots(int args)
 			NavBotBehaviorInterface.GetTaskDebugString(NavBotManager.GetNavBotByIndex(i).GetBehaviorInterface(), task, sizeof(task));
 		int aw = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
 		if (aw > 0) GetEntityClassname(aw, active, sizeof(active));
-		PrintToServer("%N at %.0f %.0f %.0f home %d job %d%s%s | %s | stuck %.0f s | %s | %s", i, me[0], me[1], me[2], g_home[i], g_job[i],
+		int h = g_home[i];
+		char spot[48] = "";
+		if (h >= 0 && g_defendCount[h] > 0)
+		{
+			int k = g_defendIdx[i] % g_defendCount[h];
+			Format(spot, sizeof(spot), " -> spot %d (%.0f %.0f %.0f)%s", k, g_defendPos[h][k][0], g_defendPos[h][k][1], g_defendPos[h][k][2], IsPatroller(i) ? " patrol" : "");
+		}
+		PrintToServer("%N at %.0f %.0f %.0f home %d job %d%s%s | %s%s | stuck %.0f s | %s | %s", i, me[0], me[1], me[2], g_home[i], g_job[i],
 			g_builder[i] ? " BUILDER" : "", FindOwnedWeapon(i, "weapon_barricade") != -1 ? " +hammer" : "",
-			g_state[i], Unstick_StuckFor(i), active, task);
+			g_state[i], spot, Unstick_StuckFor(i), active, task);
 	}
 	return Plugin_Handled;
 }
