@@ -1860,6 +1860,31 @@ as water.
 `sm_zps24zombies_status` shows each zombie's `water` level (0 dry, 1 feet, 2 waist, 3 under).
 So for any map with water: swim out once as the teacher, and the zombies copy it.
 
+### 11.18 The cabin garage: wooden door first, then open the big doors from inside
+
+The garage on zpo_cabin_outbreak has two big automatic doors (`garagedoor1/2`, func_door_rotating
+that swing up). They can't be damaged (0 hp, no damage taken); a func_button just inside each
+(`(521, -1125)` and `(194, -1125)`, a pair each) opens them. Their glass is 8 panes of 25 hp,
+but only 14 units tall between solid slats, so even with every pane broken nobody fits through.
+The small wooden side door at (894, -1155) is the way in (2000 hp at the bottom, a 1500 hp hinged
+top).
+
+The teacher's plan, and the bots' now: **break the wooden side door, then once inside press E on
+the button to open the big doors** for the horde, then kill the survivors.
+
+- After getting in (`UpdateEntry`'s "through"), and every 2 s for any zombie indoors, the zombie
+  looks for a `func_button` within 600 units on its floor, indoors, with a **closed** door
+  (`m_toggle_state` 1) within 300 units of it, that it can **see** (a trace from its eyes, so a
+  zombie outside under the overhang doesn't press through the closed door), and that isn't part
+  of a keypad (3+ buttons within 150 units, like the main house's code panel).
+- It walks up to it (eyes within 64 units), aims at it and presses E again and again until the
+  door is no longer closed, or 20 s pass. Only the real E: no reaching through walls.
+
+Tried and dropped along the way: ranking entrances by toughness (it turned zombies away from the
+wooden door, which is the right way in here), and pressing the button through the broken glass
+("they can't reach that button"). Kept: after one pane of a stacked window breaks, the zombie
+smashes the next pane in the same column (`NextPane`) before trying to climb in.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

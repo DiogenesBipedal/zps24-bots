@@ -108,6 +108,10 @@ int g_drySize[COMP_MAX_ID];
 // Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
 // staging point out of their sight, then rush together.
 ConVar g_waves;
+float g_paneAt[MAXPLAYERS + 1][3];     // where the last pane of a stacked window was
+int   g_btn[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // door button we're pressing
+float g_btnUntil[MAXPLAYERS + 1];
+float g_btnCheck[MAXPLAYERS + 1];
 bool  g_swimExit[MAXPLAYERS + 1];      // steering out of the water onto g_swimExitPos
 float g_swimExitPos[MAXPLAYERS + 1][3];
 float g_swimUntil[MAXPLAYERS + 1];
@@ -645,6 +649,29 @@ bool IsToughWindow(int ent)
 	return false;
 }
 
+// After one pane breaks: another intact pane stacked in the same window column (cabin's garage
+// doors: 14-unit panes between slats), to clear the opening further.
+int NextPane(int broken, const float at[3])
+{
+	int best = -1;
+	float bestDz = 999.0;
+	int p = -1;
+	while ((p = FindEntityByClassname(p, "func_breakable")) != -1)
+	{
+		if (p == broken || !WindowIntact(p) || EntHealth(p) <= 0 || EntHealth(p) > 200)
+			continue;
+		float c[3];
+		CenterOf(p, c);
+		float dz = FloatAbs(c[2] - at[2]);
+		if (FloatAbs(c[0] - at[0]) < 12.0 && FloatAbs(c[1] - at[1]) < 12.0 && dz < 110.0 && dz < bestDz)
+		{
+			bestDz = dz;
+			best = p;
+		}
+	}
+	return best;
+}
+
 // Height of a window's bottom edge.
 float WindowSill(int ent)
 {
@@ -984,6 +1011,109 @@ int DoorBar(int door)
 	return best;
 }
 
+// Inside, next to a closed door worked by a button (cabin's garage doors): walk to the button
+// and press E until the door opens, so the horde can come in.
+bool DoorClosedNear(const float pos[3], float radius)
+{
+	static const char doors[][] = { "func_door_rotating", "func_door" };
+	for (int k = 0; k < sizeof(doors); k++)
+	{
+		int d = -1;
+		while ((d = FindEntityByClassname(d, doors[k])) != -1)
+		{
+			float c[3];
+			CenterOf(d, c);
+			if (GetVectorDistance(c, pos) < radius && HasEntProp(d, Prop_Data, "m_toggle_state") && GetEntProp(d, Prop_Data, "m_toggle_state") == 1)
+				return true;          // TS_AT_BOTTOM: closed
+		}
+	}
+	return false;
+}
+
+int ButtonsNear(const float pos[3], float radius)
+{
+	int n = 0, b = -1;
+	while ((b = FindEntityByClassname(b, "func_button")) != -1)
+	{
+		float c[3];
+		CenterOf(b, c);
+		if (GetVectorDistance(c, pos) < radius)
+			n++;
+	}
+	return n;
+}
+
+bool TraceSeeButton(int entity, int mask, int button)
+{
+	return entity == 0 || entity == button || entity > MaxClients;
+}
+
+void StartOpenButton(int client, const float me[3])
+{
+	int best = -1;
+	float bestDist = 600.0;
+	int b = -1;
+	while ((b = FindEntityByClassname(b, "func_button")) != -1)
+	{
+		float c[3];
+		CenterOf(b, c);
+		float d = GetVectorDistance(c, me);
+		if (d >= bestDist || FloatAbs(c[2] - me[2]) > 120.0 || !Learned_Indoors(c) || !DoorClosedNear(c, 300.0))
+			continue;
+		if (ButtonsNear(c, 150.0) >= 3)
+			continue;                 // a keypad, not a door switch
+		// Same side of the door as us: we can see the button (not through the closed door).
+		float eye[3];
+		GetClientEyePosition(client, eye);
+		TR_TraceRayFilter(eye, c, MASK_SOLID, RayType_EndPoint, TraceSeeButton, b);
+		if (TR_DidHit() && TR_GetEntityIndex() != b)
+			continue;
+		bestDist = d;
+		best = b;
+	}
+	if (best == -1)
+		return;
+	g_btn[client] = EntIndexToEntRef(best);
+	g_btnUntil[client] = GetGameTime() + 20.0;
+	Debug("%N is inside: opening the doors with button %d", client, best);
+}
+
+int UpdateButton(int client, NavBot bot, const float me[3], float moveGoal[3])
+{
+	int b = EntRefToEntIndex(g_btn[client]);
+	if (b == INVALID_ENT_REFERENCE || GetGameTime() > g_btnUntil[client])
+	{
+		g_btn[client] = INVALID_ENT_REFERENCE;
+		return ENTRY_NONE;
+	}
+	float c[3], eye[3];
+	CenterOf(b, c);
+	if (!DoorClosedNear(c, 300.0))
+	{
+		Debug("%N opened the doors", client);
+		g_btn[client] = INVALID_ENT_REFERENCE;
+		return ENTRY_NONE;
+	}
+	GetClientEyePosition(client, eye);
+	if (GetVectorDistance(eye, c) > 64.0)
+	{
+		Address a = NavBotNavMesh.GetNearestNavArea(c, 200.0, false, true);
+		if (a != Address_Null)
+			NavBotNavArea.GetClosestPointOnArea(a, c, moveGoal);
+		else
+			moveGoal = c;
+		if (GetVectorDistance(me, moveGoal) > 24.0)
+			return ENTRY_PATH;
+	}
+	// There: E, again and again, until the door moves.
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Pressing the door button");
+	NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
+	if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.1);
+	return ENTRY_STEER;
+}
+
 // After climbing in: the nearest barred door of this house, on our floor.
 void StartUnbar(int client, const float me[3])
 {
@@ -1110,6 +1240,7 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 			g_entryCooldown[client] = GetGameTime() + 45.0;   // hunt in here; no going back out to an entrance
 			if (g_entryWindow[client])
 				StartUnbar(client, me);      // came in through a window: open a barred door for the horde
+			StartOpenButton(client, me);     // doors worked by a button (cabin's garage): open them
 			return ENTRY_NONE;
 		}
 		if (!g_entryWindow[client])
@@ -1135,7 +1266,20 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 	{
 		int win = EntRefToEntIndex(g_entryEnt[client]);
 		if (!WindowIntact(win) && g_entryClearAt[client] == 0.0)
+		{
+			// One pane of a stacked window gone: on to the next pane in the column.
+			int next = NextPane(win, g_paneAt[client]);
+			if (next != -1)
+			{
+				g_entryEnt[client] = EntIndexToEntRef(next);
+				g_entrySmashUntil[client] = GetGameTime() + 4.0;
+				Debug("%N: pane broken, smashing the next one", client);
+				return ENTRY_STEER;
+			}
 			g_entryClearAt[client] = GetGameTime();
+		}
+		if (win != INVALID_ENT_REFERENCE && IsValidEntity(win))
+			CenterOf(win, g_paneAt[client]);
 		// Broken: a second more of swings clears the shards, then climb in.
 		if (g_entryClearAt[client] > 0.0 && GetGameTime() - g_entryClearAt[client] > 1.0)
 		{
@@ -1746,7 +1890,14 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 
 	// Target holed up in a building: attack through an entrance of our own.
-	int entry = UpdateUnbar(client, bot, me, moveGoal);
+	if (GetGameTime() > g_btnCheck[client] && EntRefToEntIndex(g_btn[client]) == INVALID_ENT_REFERENCE && Learned_Indoors(me))
+	{
+		g_btnCheck[client] = GetGameTime() + 2.0;
+		StartOpenButton(client, me);   // inside next to closed button doors: open them for the horde
+	}
+	int entry = UpdateButton(client, bot, me, moveGoal);
+	if (entry == ENTRY_NONE)
+		entry = UpdateUnbar(client, bot, me, moveGoal);
 	if (entry == ENTRY_NONE)
 		entry = UpdateBreach(client, bot, me, g_target[client], moveGoal);   // survivor in a sealed-off part
 	if (entry == ENTRY_NONE)
