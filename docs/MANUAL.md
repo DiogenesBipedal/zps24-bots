@@ -1756,6 +1756,25 @@ it found 16: the 12 balcony drops and 4 small ledges outside. Bots now use the s
 
 Removing connections at runtime kicks every bot; the quota adds them back within seconds.
 
+### 11.16 Zombie hordes and picking off stragglers
+
+On zps_cinema the zombies lost every round. Survivors hold out together in one building, and the
+zombies came in one by one, each walking into a dozen guns. Two changes in zps24_zombies:
+
+- **Hordes** (`sm_zps24zombies_waves 1`). Once a second the plugin checks whether the survivors are
+  dug in: 3 or more within 900 units of their middle. If so, the zombies **gather** at a staging
+  point 800 units from the survivors, on the zombies' side, snapped to the nav mesh (they walk
+  there by the safest route and wait, facing their target). They **charge** together when 60%
+  of the zombie bots are within 300 units of it, or after 30 s, so they never wait forever. A
+  charge lasts 45 s, then they gather again. While gathering, a zombie still attacks anyone it
+  sees within 500 units, and any lone survivor within 1500.
+- **Stragglers first.** When choosing whom to hunt, each other survivor within 450 units of a
+  target counts as 300 units of extra distance. So patrollers and anyone who wanders off get
+  picked off first, and the zombie numbers grow before the big push.
+
+Debug (`sm_zps24zombies_debug 1`, in server.log): "Horde: gathering at ..." and
+"Horde: CHARGE with N of M zombies".
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

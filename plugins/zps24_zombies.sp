@@ -100,11 +100,26 @@ bool  g_brOpen[BR_MAX];                // cleared and linked into the nav mesh
 #define COMP_MAX_ID 8192
 int g_comp[COMP_MAX_ID];
 
+// Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
+// staging point out of their sight, then rush together.
+ConVar g_waves;
+#define ENTRY_NONE  0
+#define ENTRY_PATH  1      // moveGoal set: path there
+#define ENTRY_STEER 2      // steering the bot ourselves (no pathing)
+#define WAVE_GATHER 0
+#define WAVE_CHARGE 1
+int   g_waveState = WAVE_CHARGE;
+float g_waveSince;                     // when the current phase started
+float g_waveCheck;                     // next recompute
+float g_stagePos[3];
+bool  g_stageValid;
+
 public void OnPluginStart()
 {
 	g_enable = CreateConVar("sm_zps24zombies_enable", "1", "Enable the ZPS 2.4 zombie AI");
 	g_debug  = CreateConVar("sm_zps24zombies_debug", "0", "Log zombie AI decisions");
 	g_buildSteps = CreateConVar("sm_zps24zombies_build_steps", "0", "Zombie bots push furniture the main player moved as a zombie into place (steps up to roofs)");
+	g_waves = CreateConVar("sm_zps24zombies_waves", "1", "Zombie bots gather into a horde before rushing survivors holding out together");
 	g_forceTarget = CreateConVar("sm_zps24zombies_force_target", "0", "Debug: every zombie hunts this client index (0 = normal)");
 	RegServerCmd("sm_zps24_doorbars", Cmd_DoorBars, "List physics props right next to doors (planks barring them)");
 	RegServerCmd("sm_zps24_doorlinks", Cmd_DoorLinks, "Connect the nav areas on both sides of every door again and report");
@@ -117,6 +132,9 @@ void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 	g_fixedCount = 0;                   // props respawn every round
 	g_toughWinCount = 0;
 	g_doorsLinked = false;              // props respawn: find the openings and their blockers again
+	g_waveState = WAVE_CHARGE;
+	g_stageValid = false;
+	g_waveCheck = 0.0;
 	Stairs_Relearn();
 	ResetPlacements();
 }
@@ -178,7 +196,9 @@ int PickTarget(int zombie)
 			continue;
 		GetClientAbsOrigin(i, pos);
 		ids[n] = i;
-		dist[n] = GetVectorDistance(me, pos);
+		// Lone survivors first (a patroller, a straggler): each ally next to them counts as
+		// 300 units further away.
+		dist[n] = GetVectorDistance(me, pos) + 300.0 * float(SurvivorsNear(pos, 450.0, i));
 		n++;
 	}
 	if (n == 0)
@@ -193,6 +213,115 @@ int PickTarget(int zombie)
 				int ti = ids[a]; ids[a] = ids[b]; ids[b] = ti;
 			}
 	return ids[GetRandomInt(0, k - 1)];
+}
+
+int SurvivorsNear(const float pos[3], float radius, int except = 0)
+{
+	int n = 0;
+	float p[3];
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (i == except || !IsLiveSurvivor(i))
+			continue;
+		GetClientAbsOrigin(i, p);
+		if (GetVectorDistance(p, pos) < radius)
+			n++;
+	}
+	return n;
+}
+
+// Once a second: are the survivors holding out together (3+ within 900 units of their middle)?
+// Then gather the horde at a staging point 800 units from them on the zombies' side, and charge
+// once most of the zombies are there (or after 30 s). A charge lasts 45 s, then gather again.
+void UpdateWave()
+{
+	float now = GetGameTime();
+	if (now < g_waveCheck)
+		return;
+	g_waveCheck = now + 1.0;
+	if (!g_waves.BoolValue)
+	{
+		g_waveState = WAVE_CHARGE;
+		return;
+	}
+	float sc[3], zc[3], p[3];
+	int ns = 0, nz = 0;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsPlayerAlive(i))
+			continue;
+		GetClientAbsOrigin(i, p);
+		if (GetClientTeam(i) == TEAM_SURVIVORS) { AddVectors(sc, p, sc); ns++; }
+		else if (GetClientTeam(i) == TEAM_ZOMBIES && IsFakeClient(i)) { AddVectors(zc, p, zc); nz++; }
+	}
+	if (ns == 0 || nz == 0)
+	{
+		g_waveState = WAVE_CHARGE;
+		return;
+	}
+	ScaleVector(sc, 1.0 / float(ns));
+	ScaleVector(zc, 1.0 / float(nz));
+	bool dugIn = SurvivorsNear(sc, 900.0) >= 3;
+
+	if (g_waveState == WAVE_CHARGE)
+	{
+		if (dugIn && now - g_waveSince > 45.0)
+		{
+			float dir[3];
+			SubtractVectors(zc, sc, dir);
+			dir[2] = 0.0;
+			if (GetVectorLength(dir) < 1.0) dir[0] = 1.0;
+			NormalizeVector(dir, dir);
+			ScaleVector(dir, 800.0);
+			float want[3];
+			AddVectors(sc, dir, want);
+			want[2] = zc[2];
+			Address a = NavBotNavMesh.GetNearestNavArea(want, 600.0, false, true);
+			if (a == Address_Null)
+				a = NavBotNavMesh.GetNearestNavArea(zc, 600.0, false, true);
+			g_stageValid = a != Address_Null;
+			if (g_stageValid)
+			{
+				NavBotNavArea.GetCenter(a, g_stagePos);
+				g_waveState = WAVE_GATHER;
+				g_waveSince = now;
+				Debug("Horde: gathering at %.0f %.0f %.0f (%d zombies, survivors dug in at %.0f %.0f %.0f)", g_stagePos[0], g_stagePos[1], g_stagePos[2], nz, sc[0], sc[1], sc[2]);
+			}
+		}
+		return;
+	}
+
+	int there = 0;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES || !IsFakeClient(i))
+			continue;
+		GetClientAbsOrigin(i, p);
+		if (GetVectorDistance(p, g_stagePos) < 300.0)
+			there++;
+	}
+	if (!dugIn || there >= RoundToCeil(float(nz) * 0.6) || now - g_waveSince > 30.0)
+	{
+		Debug("Horde: CHARGE with %d of %d zombies", there, nz);
+		g_waveState = WAVE_CHARGE;
+		g_waveSince = now;
+	}
+}
+
+// While the horde gathers: walk to the staging point and wait there. Lone survivors nearby and
+// anyone in plain view close by are still fair game. Returns ENTRY_* (NONE = hunt as usual).
+int UpdateHorde(int client, const float me[3], const float target[3], bool sees, float moveGoal[3])
+{
+	UpdateWave();
+	if (g_waveState != WAVE_GATHER || !g_stageValid)
+		return ENTRY_NONE;
+	float d = GetVectorDistance(me, target);
+	if ((sees && d < 500.0) || (SurvivorsNear(target, 450.0, g_target[client]) == 0 && d < 1500.0))
+		return ENTRY_NONE;
+	if (GetVectorDistance(me, g_stagePos) < 120.0)
+		return ENTRY_STEER;          // wait for the others
+	moveGoal = g_stagePos;
+	return ENTRY_PATH;
 }
 
 // Walls only: players and props don't block the view for this purpose.
@@ -431,9 +560,6 @@ bool ChooseEntry(int client, const float target[3])
 	return found;
 }
 
-#define ENTRY_NONE  0
-#define ENTRY_PATH  1      // moveGoal set: path there
-#define ENTRY_STEER 2      // steering the bot ourselves (no pathing)
 
 // ---------------------------------------------------------------------------------------------
 // Breaking through to a survivor in a part of the map we can't walk to (behind a plank, a
@@ -1388,6 +1514,21 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		else
 			Unstick_WantMove(client, me, moveGoal);
 		return stairs;
+	}
+
+	// Survivors dug in together: gather into a horde first, then rush in together.
+	int horde = UpdateHorde(client, me, target, sees, moveGoal);
+	if (horde == ENTRY_STEER)
+	{
+		g_us_wantMove[client] = false;
+		NavBotPlayerControllerInterface.AimAtPos(bot.GetPlayerControllerInterface(), target, LOOK_SEARCH, 1.0, "Waiting for the horde");
+		return Plugin_Continue;
+	}
+	if (horde == ENTRY_PATH)
+	{
+		routeType = NAVBOT_SAFEST_ROUTE;   // out of their line of fire on the way
+		Unstick_WantMove(client, me, moveGoal);
+		return Plugin_Changed;
 	}
 
 	// Target holed up in a building: attack through an entrance of our own.
