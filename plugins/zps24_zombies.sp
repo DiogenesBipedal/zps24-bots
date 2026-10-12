@@ -108,6 +108,8 @@ int g_drySize[COMP_MAX_ID];
 // Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
 // staging point out of their sight, then rush together.
 ConVar g_waves;
+int   g_relinked[64];                  // button-only doors already linked through once open
+int   g_relinkedCount;
 float g_forceEntryUntil[MAXPLAYERS + 1];   // ran into a button-only door: find a way in instead
 int   g_skipDoor[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 float g_paneAt[MAXPLAYERS + 1][3];     // where the last pane of a stacked window was
@@ -152,6 +154,7 @@ void Event_RoundRestart(Event event, const char[] name, bool dontBroadcast)
 	g_fixedCount = 0;                   // props respawn every round
 	g_toughWinCount = 0;
 	g_doorsLinked = false;              // props respawn: find the openings and their blockers again
+	g_relinkedCount = 0;
 	g_waveState = WAVE_CHARGE;
 	g_stageValid = false;
 	g_waveCheck = 0.0;
@@ -670,6 +673,82 @@ bool IsToughWindow(int ent)
 // A closed door only a button opens (no "Use opens" 256, no "Touch opens" 1024): cabin's big
 // garage doors. Walking into it does nothing, and the nav mesh runs straight through it (the
 // generator ignores doors).
+// The mesh has no connections through doors only a button opens (sm_navbuttondoors cut them:
+// the generator ran straight through the closed garage doors). Once one is open, link the floor
+// on both sides of it, at a few points across its width, so the horde walks in.
+float FloorBelow(const float pos[3])
+{
+	float down[3];
+	down = pos;
+	down[2] -= 600.0;
+	TR_TraceRayFilter(pos, down, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
+	float hit[3];
+	TR_GetEndPosition(hit);
+	return hit[2];
+}
+
+void RelinkOpenedButtonDoors()
+{
+	static float next;
+	if (GetGameTime() < next)
+		return;
+	next = GetGameTime() + 1.0;
+	static const char classes[][] = { "func_door", "func_door_rotating" };
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int door = -1;
+		while ((door = FindEntityByClassname(door, classes[c])) != -1)
+		{
+			if ((GetEntProp(door, Prop_Data, "m_spawnflags") & (256 | 1024)) != 0 || GetEntProp(door, Prop_Data, "m_toggle_state") != 0)
+				continue;              // not button-only, or not fully open
+			int ref = EntIndexToEntRef(door);
+			bool done = false;
+			for (int i = 0; i < g_relinkedCount; i++)
+				if (g_relinked[i] == ref) { done = true; break; }
+			if (done || g_relinkedCount >= sizeof(g_relinked))
+				continue;
+			g_relinked[g_relinkedCount++] = ref;
+			// Where the door hangs when closed: its saved closed position is gone, so use the
+			// gap in the wall: the doorway's middle is where the two sides' floors meet. The
+			// door's own bounds still span the doorway's width.
+			float o[3], mins[3], maxs[3];
+			GetEntPropVector(door, Prop_Data, "m_vecAbsOrigin", o);
+			GetEntPropVector(door, Prop_Send, "m_vecMins", mins);
+			GetEntPropVector(door, Prop_Send, "m_vecMaxs", maxs);
+			float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1];
+			int along = sx > sy ? 0 : 1;
+			float n[3];
+			n[0] = along == 1 ? 1.0 : 0.0;
+			n[1] = along == 0 ? 1.0 : 0.0;
+			int made = 0;
+			for (int q = 1; q <= 3; q++)
+			{
+				float p[3], pa[3], pb[3];
+				p[0] = o[0]; p[1] = o[1]; p[2] = FloorBelow(o) + 20.0;
+				p[along] = o[along] + mins[along] + (maxs[along] - mins[along]) * float(q) / 4.0;
+				Address a = SideArea(p, n, 1.0, pa);
+				Address b = SideArea(p, n, -1.0, pb);
+				if (a == Address_Null || b == Address_Null || a == b || FloatAbs(pa[2] - pb[2]) > 24.0)
+					continue;
+				if (!NavBotNavArea.IsConnectedToAny(a, b) && NavBotNavArea.ConnectToAdjacent(a, b)) made++;
+				if (!NavBotNavArea.IsConnectedToAny(b, a) && NavBotNavArea.ConnectToAdjacent(b, a)) made++;
+			}
+			char name[64];
+			GetEntPropString(door, Prop_Data, "m_iName", name, sizeof(name));
+			Debug("Door %d '%s' is open: %d connections through it", door, name, made);
+		}
+	}
+}
+
+// Busy getting into a building (heading for an entrance, breaking it, going through, opening its
+// doors): stick with the survivor we came for, or we walk off from an open door.
+bool EnteringBuilding(int client)
+{
+	float now = GetGameTime();
+	return g_hasEntry[client] || now < g_entryInUntil[client] || now < g_entrySmashUntil[client]
+		|| EntRefToEntIndex(g_btn[client]) != INVALID_ENT_REFERENCE;
+}
+
 bool ButtonOnlyDoor(int ent)
 {
 	if (ent <= MaxClients || !IsValidEntity(ent))
@@ -1905,7 +1984,7 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 
 	if (g_forceTarget.IntValue > 0 && IsLiveSurvivor(g_forceTarget.IntValue))
 		g_target[client] = g_forceTarget.IntValue;
-	else if (!IsLiveSurvivor(g_target[client]) || GetGameTime() > g_retarget[client])
+	else if (!IsLiveSurvivor(g_target[client]) || (GetGameTime() > g_retarget[client] && !EnteringBuilding(client)))
 	{
 		g_target[client] = PickTarget(client);
 		g_retarget[client] = GetGameTime() + GetRandomFloat(8.0, 14.0);
@@ -2380,6 +2459,7 @@ Action Timer_Think(Handle timer)
 	}
 
 	AssignPlacements();
+	RelinkOpenedButtonDoors();
 	static float nextOpenCheck;
 	if (g_doorsLinked && GetGameTime() >= nextOpenCheck)
 	{

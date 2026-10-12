@@ -8,6 +8,8 @@
 //   sm_navfixdrops [apply]           drop-down connections a player can't actually take (a railing
 //                                    or glass on the ledge): list them, or with "apply" remove them
 //                                    (then sm_nav_save to keep the fixed mesh)
+//   sm_navbuttondoors [apply]        connections running through a closed door that only a button
+//                                    opens (the generator ignores doors): list or remove them
 //   sm_navwater [apply]              connections into water areas (from anywhere): list them, or
 //                                    remove them, so paths never lead into or across a lake; the
 //                                    ways out of the water stay
@@ -31,6 +33,7 @@ public void OnPluginStart()
 	RegServerCmd("sm_where", Cmd_Where, "sm_where team: positions of a team's living players");
 	RegServerCmd("sm_navreach", Cmd_NavReach, "sm_navreach x y z x1 y1 z1 x2 y2 z2: which areas in the box are reachable from the area at x y z");
 	RegServerCmd("sm_navfixdrops", Cmd_NavFixDrops, "sm_navfixdrops [apply]: find (and remove) drop-down connections blocked by railings");
+	RegServerCmd("sm_navbuttondoors", Cmd_NavButtonDoors, "sm_navbuttondoors [apply]: find (and remove) connections running through doors only a button opens");
 	RegServerCmd("sm_contents", Cmd_Contents, "sm_contents x y z: brush contents at a point");
 	RegServerCmd("sm_navwater", Cmd_NavWater, "sm_navwater [apply]: find (and remove) connections from dry ground into water");
 	RegServerCmd("sm_navseed", Cmd_NavSeed, "sm_navseed x y z: add a walkable seed for (incremental) nav generation");
@@ -339,5 +342,82 @@ Action Cmd_Contents(int args)
 	for (int i = 0; i < 3; i++) p[i] = ArgF(i + 1);
 	int c = TR_GetPointContents(p);
 	PrintToServer("[contents] %.0f %.0f %.0f: 0x%x%s", p[0], p[1], p[2], c, (c & MASK_WATER) ? " WATER" : "");
+	return Plugin_Handled;
+}
+
+// A door with neither "Use opens" (256) nor "Touch opens" (1024): only a button or a trigger works it.
+bool ButtonOnly(int ent)
+{
+	return (GetEntProp(ent, Prop_Data, "m_spawnflags") & (256 | 1024)) == 0;
+}
+
+Action Cmd_NavButtonDoors(int args)
+{
+	char arg[16];
+	GetCmdArg(1, arg, sizeof(arg));
+	bool apply = StrEqual(arg, "apply");
+	static const char classes[][] = { "func_door", "func_door_rotating" };
+	static Address fromA[1024], toB[1024];
+	int found = 0;
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int door = -1;
+		while ((door = FindEntityByClassname(door, classes[c])) != -1)
+		{
+			if (!ButtonOnly(door) || GetEntProp(door, Prop_Data, "m_toggle_state") != 1)
+				continue;   // opens with E or by touch, or isn't closed
+			float o[3], mins[3], maxs[3], lo[3], hi[3];
+			GetEntPropVector(door, Prop_Data, "m_vecAbsOrigin", o);
+			GetEntPropVector(door, Prop_Send, "m_vecMins", mins);
+			GetEntPropVector(door, Prop_Send, "m_vecMaxs", maxs);
+			for (int i = 0; i < 3; i++) { lo[i] = o[i] + mins[i]; hi[i] = o[i] + maxs[i]; }
+			// The door's plane: its thin axis.
+			int axis = (hi[0] - lo[0]) < (hi[1] - lo[1]) ? 0 : 1;
+			float plane = (lo[axis] + hi[axis]) * 0.5;
+			float span[3], spanHi[3];
+			span = lo; spanHi = hi;
+			span[axis] -= 80.0; spanHi[axis] += 80.0;
+			span[2] -= 40.0;
+			NavBotNavAreaVector v = NavBotNavMesh.CollectAreasOverlappingExtent(span, spanHi);
+			for (int i = 0; i < v.Size; i++)
+			{
+				Address a = v.At(i);
+				float ca[3];
+				NavBotNavArea.GetCenter(a, ca);
+				for (int d = 0; d < 4; d++)
+				{
+					int n = NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
+					for (int k = 0; k < n && found < sizeof(fromA); k++)
+					{
+						Address b = NavBotNavArea.GetAdjacentArea(a, view_as<NavBotNavDirType>(d), k);
+						float cb[3], pa[3], pb[3];
+						NavBotNavArea.GetCenter(b, cb);
+						NavBotNavArea.GetClosestPointOnArea(a, cb, pa);
+						NavBotNavArea.GetClosestPointOnArea(b, ca, pb);
+						// Crossing the door: the two areas' facing edges are on opposite sides of
+						// its plane, and where they meet is within the door's width and height.
+						float mid[3];
+						for (int j = 0; j < 3; j++) mid[j] = (pa[j] + pb[j]) * 0.5;
+						int other = 1 - axis;
+						bool crosses = (ca[axis] - plane) * (cb[axis] - plane) < 0.0;
+						if (!crosses || mid[other] < lo[other] - 8.0 || mid[other] > hi[other] + 8.0 || mid[2] > hi[2] || mid[2] < lo[2] - 40.0)
+							continue;
+						fromA[found] = a;
+						toB[found] = b;
+						found++;
+					}
+				}
+			}
+			delete v;
+			char name[64];
+			GetEntPropString(door, Prop_Data, "m_iName", name, sizeof(name));
+			PrintToServer("[navbuttondoors] door %d '%s' at %.0f %.0f %.0f: %d connections through it so far", door, name,
+				(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5, found);
+		}
+	}
+	if (apply)
+		for (int i = 0; i < found; i++)
+			NavBotNavArea.DisconnectFromAdjacent(fromA[i], toB[i]);
+	PrintToServer("[navbuttondoors] %d connections%s", found, apply ? " removed (sm_nav_save to keep)" : " (sm_navbuttondoors apply to remove)");
 	return Plugin_Handled;
 }

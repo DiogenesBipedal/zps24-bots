@@ -1895,6 +1895,18 @@ straight at them. Now:
 - "close and in plain view: go straight for them" only when a body-sized trace reaches them
   (`WalkableStraight`), not through glass or a door.
 
+**Still colliding, and the open wooden door ignored.** Two more causes. First, the nav mesh itself
+ran through the closed garage doors (16 connections), so the shortest path to anyone inside the
+garage went there, never round to the side door. `sm_navbuttondoors` (zps24_navdebug) finds
+connections crossing a closed button-only door (areas on opposite sides of the door's plane,
+meeting within its width and height), and `sm_navbuttondoors apply` removes them; the cabin mesh
+is saved without them. When such a door opens (a zombie pressed the button), the zombie plugin
+links the floor on both sides again at three points across its width (`RelinkOpenedButtonDoors`,
+the floor found with a trace down from the hinge), so the horde walks in. Second, zombies
+re-picked their target every 8-14 s, and one that had reached the open side door walked off
+after someone else. Now a zombie keeps its target while it is getting into a building (heading
+for an entrance, breaking it, going through, opening its doors).
+
 Tried and dropped along the way: ranking entrances by toughness (it turned zombies away from the
 wooden door, which is the right way in here), and pressing the button through the broken glass
 ("they can't reach that button"). Kept: after one pane of a stacked window breaks, the zombie
