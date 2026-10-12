@@ -785,6 +785,21 @@ void ForceEntry(int client, int door)
 	Debug("%N: door %d only opens from a button, finding another way in", client, door);
 }
 
+// A claw hit landing on a plank: the knock that jars it loose (the planks lose next to no health;
+// it's the hits moving them that brings them down).
+Action Timer_PlankKnock(Handle timer, DataPack pack)
+{
+	pack.Reset();
+	int bar = EntRefToEntIndex(pack.ReadCell());
+	float v[3];
+	v[0] = pack.ReadFloat();
+	v[1] = pack.ReadFloat();
+	v[2] = pack.ReadFloat();
+	if (bar != INVALID_ENT_REFERENCE)
+		TeleportEntity(bar, NULL_VECTOR, NULL_VECTOR, v);
+	return Plugin_Stop;
+}
+
 // After one pane breaks: another intact pane stacked in the same window column (cabin's garage
 // doors: 14-unit panes between slats), to clear the opening further.
 int NextPane(int broken, const float at[3])
@@ -866,12 +881,20 @@ bool ChooseEntry(int client, const float target[3])
 		}
 	}
 
-	static const char classes[][] = { "func_door_rotating", "prop_door_rotating", "func_door", "func_breakable", "func_breakable_surf" };
+	static const char classes[][] = { "func_door_rotating", "prop_door_rotating", "func_door", "func_breakable", "func_breakable_surf", "func_physbox", "func_physbox_multiplayer" };
 	for (int c = 0; c < sizeof(classes); c++)
 	{
 		int ent = -1;
 		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
 		{
+			// A physics door (cabin's main house) counts only with no planks on it: then just bust
+			// it open and walk in, before any window.
+			bool phys = c >= 5;
+			if (phys && !IsPhysDoor(ent))
+				continue;
+			bool barred = phys && DoorBar(ent) != -1;
+			if (barred && (GetGameTime() < g_doorsOnlyUntil[client] || IsToughWindow(ent)))
+				continue;                    // its planks wouldn't come off last time
 			if (ButtonOnlyDoor(ent) || InButtonOnlyDoor(ent) || EntIndexToEntRef(ent) == g_skipDoor[client])
 				continue;                    // only a button opens it: not a way in from outside
 			float center[3];
@@ -888,14 +911,18 @@ bool ChooseEntry(int client, const float target[3])
 			out[2] = center[2] - 30.0;
 			inside[2] = center[2] - 30.0;
 			if ((Learned_Indoors(out) && GetGameTime() >= g_forceEntryUntil[client]) || !Learned_Indoors(inside))
+			{
+				if (phys)
+					Debug("%N: physics door %d not a way in (outside roofed %d, inside roofed %d)", client, ent, Learned_Indoors(out), Learned_Indoors(inside));
 				continue;                   // not a way from outside to inside
+			}
 			Address area = NavBotNavMesh.GetNearestNavArea(out, 100.0, false, true);
 			if (area == Address_Null)
 				continue;
 			NavBotNavArea.GetClosestPointOnArea(area, out, out);
 			// Ground-floor windows first: smash the glass and climb straight in, no walking round
 			// to a door. "Ground floor": the sill no higher than a crouch-jump from outside.
-			bool window = c >= 3;
+			bool window = c == 3 || c == 4;
 			if (window && (GetGameTime() < g_doorsOnlyUntil[client] || IsToughWindow(ent)))
 				continue;                    // too strong or too slow last time: doors instead
 			if (window)
@@ -912,7 +939,9 @@ bool ChooseEntry(int client, const float target[3])
 					continue;
 				inside = inFloor;
 			}
-			float cost = d + 500.0 * float(EntryLoad(client, out)) - (window ? 250.0 : 0.0);
+			// A physics door: no planks, bust it open (best); planked, knock them off first (as good
+			// as a window).
+			float cost = d + 500.0 * float(EntryLoad(client, out)) - (window ? 250.0 : 0.0) - (phys ? (barred ? 250.0 : 350.0) : 0.0);
 			if (cost < bestCost)
 			{
 				bestCost = cost;
@@ -1438,6 +1467,29 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 		}
 		if (!g_entryWindow[client])
 		{
+			int pd = EntRefToEntIndex(g_entryEnt[client]);
+			if (pd != INVALID_ENT_REFERENCE && IsPhysDoor(pd))
+			{
+				// Bust the physics door open and walk straight in (it isn't linked in the mesh).
+				if (GetGameTime() >= g_nextShove[client])
+				{
+					float dc2[3], push[3];
+					CenterOf(pd, dc2);
+					SubtractVectors(dc2, me, push);
+					push[2] = 0.0;
+					NormalizeVector(push, push);
+					ScaleVector(push, 300.0);
+					TeleportEntity(pd, NULL_VECTOR, NULL_VECTOR, push);
+					NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKSEC, 0.2);
+					g_nextShove[client] = GetGameTime() + 0.6;
+				}
+				float look2[3];
+				look2 = g_entryIn[client];
+				look2[2] += 40.0;
+				NavBotPlayerControllerInterface.AimAtPos(ctrl, look2, LOOK_MOVEMENT, 0.3, "Busting the door open");
+				NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), g_entryIn[client], 100);
+				return ENTRY_STEER;
+			}
 			moveGoal = g_entryIn[client];
 			return ENTRY_PATH;
 		}
@@ -1458,6 +1510,43 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 	if (GetGameTime() < g_entrySmashUntil[client])
 	{
 		int win = EntRefToEntIndex(g_entryEnt[client]);
+		bool physDoor = win != INVALID_ENT_REFERENCE && IsPhysDoor(win);
+		if (physDoor)
+		{
+			// Hit the planks (highest first: the one reachable from outside), each hit knocking it
+			// inward; when none is left, bust the door open and walk in.
+			int bar = DoorBar(win);
+			if (bar == -1)
+			{
+				g_entrySmashUntil[client] = 0.0;
+				g_entryInUntil[client] = GetGameTime() + 6.0;
+				g_entryCooldown[client] = GetGameTime() + 20.0;
+				Debug("%N knocked the planks off, busting the door open", client);
+				return ENTRY_STEER;
+			}
+			float bc[3];
+			CenterOf(bar, bc);
+			NavBotPlayerControllerInterface.AimAtPos(ctrl, bc, LOOK_PRIORITY, 0.4, "Knocking a plank off the door");
+			NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), bc, 60);
+			if (GetGameTime() >= g_nextShove[client] && NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+			{
+				NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.2);
+				g_nextShove[client] = GetGameTime() + 0.7;
+				float push[3];
+				SubtractVectors(bc, me, push);
+				push[2] = 0.0;
+				NormalizeVector(push, push);
+				ScaleVector(push, 120.0);
+				push[2] = 80.0;
+				DataPack pack;
+				CreateDataTimer(0.25, Timer_PlankKnock, pack, TIMER_FLAG_NO_MAPCHANGE);
+				pack.WriteCell(EntIndexToEntRef(bar));
+				pack.WriteFloat(push[0]);
+				pack.WriteFloat(push[1]);
+				pack.WriteFloat(push[2]);
+			}
+			return ENTRY_STEER;
+		}
 		if (!WindowIntact(win) && g_entryClearAt[client] == 0.0)
 		{
 			// One pane of a stacked window gone: on to the next pane in the column.
@@ -1502,7 +1591,7 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 		g_doorsOnlyUntil[client] = GetGameTime() + 30.0;
 		g_hasEntry[client] = false;
 		g_entryCooldown[client] = 0.0;
-		Debug("%N: window too strong, going for a door", client);
+		Debug("%N: window (or planked door) too strong, trying another way in", client);
 		return ENTRY_NONE;
 	}
 
@@ -1530,6 +1619,15 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 	}
 	// At the entrance.
 	g_hasEntry[client] = false;
+	int atEnt = EntRefToEntIndex(g_entryEnt[client]);
+	if (!g_entryWindow[client] && atEnt != INVALID_ENT_REFERENCE && IsPhysDoor(atEnt) && DoorBar(atEnt) != -1)
+	{
+		// Planks on a physics door: knock them off from out here first (the main player's way).
+		g_entrySmashUntil[client] = GetGameTime() + 20.0;
+		g_entryClearAt[client] = 0.0;
+		Debug("%N knocks the planks off door %d", client, atEnt);
+		return ENTRY_STEER;
+	}
 	if (g_entryWindow[client])
 	{
 		g_entrySmashUntil[client] = GetGameTime() + 8.0;

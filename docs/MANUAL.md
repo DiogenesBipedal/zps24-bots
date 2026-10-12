@@ -1964,6 +1964,17 @@ above the door's bottom edge). Planks are brushes of material wood, so `IsWooden
 click. Once no plank is left, the zombie shoves the door outward (300 units/s) instead of the
 "Open" input a real door gets, and it swings open for the horde.
 
+**Then from outside too** (the teacher: "if no planks on door just bust it open and go in instead
+of window"). Physics doors are entrances now, in `ChooseEntry`. One with no planks left ranks
+ahead of windows (-350 against a window's -250): the zombie walks straight at it, shoving it
+open as it goes (it isn't linked in the nav mesh), until it's through. One still planked ranks
+like a window: at the door the zombie aims at the planks and left-clicks, each hit giving the
+plank an inward knock (as the teacher's hits did). When `DoorBar` finds no plank left, it busts the
+door open and walks in. 20 s without clearing them: the door counts as too tough for a while and
+it takes a window. The house the survivors use on cabin has `frontdoorwhite` (68, -476) and
+`backdoor` (801, -116), each held by two 1000 hp planks; the house to the west has
+`newhousedoor1` and `newdoor`.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
