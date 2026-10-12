@@ -1795,6 +1795,30 @@ the other 2007 mods use (name 4, next 8, server class 0). Check with `sm_dump_te
 it writes 44 temp entities (into `zps/`). SDKTools reads this at startup, so it takes effect
 after a server restart.
 
+### 11.17 Getting out of the water (the lake maps)
+
+On zpo_lake_of_the_dead the zombies spawn in the lake and paddled against the platforms forever.
+Three things learned on the way:
+
+- **The lake's `trigger_push` isn't a lift.** "zspawn" is a zombie-only push straight up, but
+  it covers the whole lake below z 64. It just floats zombies to the surface. And the
+  platforms are about 110 units above the surface, too high for Source's water jump (hold jump +
+  forward against a ledge), which only climbs edges below eye height.
+- **The way out is the main player's.** The recording (`data/zps24_learn/rec/<map>.csv`) shows
+  the teacher walking along the lake bottom to (-40 1146 0), up an underwater slope to z 63,
+  then up the bank to z 139 and onto the platform. zps24_learn had saved it as a route that
+  starts in the water and ends on dry ground higher up.
+- **Rule: always get out of the water first.** A zombie at water level 2 or more (waist deep)
+  does nothing else (`UpdateSwim`, before hunting, hordes or entries). It holds jump to stay at
+  the surface and heads for the nearest learned route that starts in the water and ends dry and
+  60+ units higher. It then follows that route point by point, also after leaving the water,
+  until the last point. If there is no such route, or a bank or ramp at about its own height is
+  400+ units closer, it goes to the bank. After that the normal hunt takes over: windows and
+  doors first, roofs through the teacher's climbing routes.
+
+`sm_zps24zombies_status` shows each zombie's `water` level (0 dry, 1 feet, 2 waist, 3 under).
+So for any map with water: swim out once as the teacher, and the zombies copy it.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
