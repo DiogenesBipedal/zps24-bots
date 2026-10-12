@@ -1880,6 +1880,21 @@ the button to open the big doors** for the horde, then kill the survivors.
 - It walks up to it (eyes within 64 units), aims at it and presses E again and again until the
   door is no longer closed, or 20 s pass. Only the real E: no reaching through walls.
 
+**Still walking into the big doors.** Source's nav generator ignores doors, so the mesh runs
+straight through the closed garage doors. Zombies under the garage's overhang counted as indoors
+and skipped the entrance logic, and anyone seeing a survivor through the broken glass rushed
+straight at them. Now:
+
+- a **button-only door** (func_door / func_door_rotating with neither "Use opens" 256 nor "Touch
+  opens" 1024, closed) that a zombie runs into, whether NavBot reports it on the path or the
+  zombie gets stuck on it, switches that zombie to the entrance logic for 30 s, even under an
+  overhang. It then goes to the wooden side door ("door 713 only opens from a button, finding
+  another way in");
+- such doors, and the glass set into them (panes parented to them), are never chosen as
+  entrances;
+- "close and in plain view: go straight for them" only when a body-sized trace reaches them
+  (`WalkableStraight`), not through glass or a door.
+
 Tried and dropped along the way: ranking entrances by toughness (it turned zombies away from the
 wooden door, which is the right way in here), and pressing the button through the broken glass
 ("they can't reach that button"). Kept: after one pane of a stacked window breaks, the zombie

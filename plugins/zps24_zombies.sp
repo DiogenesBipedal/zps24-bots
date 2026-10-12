@@ -108,6 +108,8 @@ int g_drySize[COMP_MAX_ID];
 // Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
 // staging point out of their sight, then rush together.
 ConVar g_waves;
+float g_forceEntryUntil[MAXPLAYERS + 1];   // ran into a button-only door: find a way in instead
+int   g_skipDoor[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 float g_paneAt[MAXPLAYERS + 1][3];     // where the last pane of a stacked window was
 int   g_btn[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // door button we're pressing
 float g_btnUntil[MAXPLAYERS + 1];
@@ -535,6 +537,22 @@ bool UpdateSwim(int client, NavBot bot)
 	return true;
 }
 
+bool TraceNoPlayers(int entity, int mask)
+{
+	return entity > MaxClients;
+}
+
+// Nothing solid (a door, glass, a wall) between us and them at body height: we can just walk up.
+bool WalkableStraight(const float me[3], const float target[3])
+{
+	float a[3], b[3];
+	a = me; b = target;
+	a[2] += 24.0; b[2] += 24.0;
+	float mins[3] = { -12.0, -12.0, 0.0 }, maxs[3] = { 12.0, 12.0, 36.0 };
+	TR_TraceHullFilter(a, b, mins, maxs, MASK_PLAYERSOLID, TraceNoPlayers);
+	return !TR_DidHit();
+}
+
 // Walls only: players and props don't block the view for this purpose.
 bool CanSee(int a, int b)
 {
@@ -649,6 +667,39 @@ bool IsToughWindow(int ent)
 	return false;
 }
 
+// A closed door only a button opens (no "Use opens" 256, no "Touch opens" 1024): cabin's big
+// garage doors. Walking into it does nothing, and the nav mesh runs straight through it (the
+// generator ignores doors).
+bool ButtonOnlyDoor(int ent)
+{
+	if (ent <= MaxClients || !IsValidEntity(ent))
+		return false;
+	char cls[64];
+	GetEntityClassname(ent, cls, sizeof(cls));
+	if (!StrEqual(cls, "func_door") && !StrEqual(cls, "func_door_rotating"))
+		return false;
+	int flags = GetEntProp(ent, Prop_Data, "m_spawnflags");
+	return (flags & (256 | 1024)) == 0 && HasEntProp(ent, Prop_Data, "m_toggle_state") && GetEntProp(ent, Prop_Data, "m_toggle_state") == 1;
+}
+
+// Glass set into such a door (its panes are parented to it).
+bool InButtonOnlyDoor(int ent)
+{
+	int parent = HasEntProp(ent, Prop_Data, "m_hMoveParent") ? GetEntPropEnt(ent, Prop_Data, "m_hMoveParent") : -1;
+	return parent > MaxClients && ButtonOnlyDoor(parent);
+}
+
+void ForceEntry(int client, int door)
+{
+	if (GetGameTime() < g_forceEntryUntil[client])
+		return;
+	g_forceEntryUntil[client] = GetGameTime() + 30.0;
+	g_skipDoor[client] = EntIndexToEntRef(door);
+	g_hasEntry[client] = false;
+	g_entryCooldown[client] = 0.0;
+	Debug("%N: door %d only opens from a button, finding another way in", client, door);
+}
+
 // After one pane breaks: another intact pane stacked in the same window column (cabin's garage
 // doors: 14-unit panes between slats), to clear the opening further.
 int NextPane(int broken, const float at[3])
@@ -736,6 +787,8 @@ bool ChooseEntry(int client, const float target[3])
 		int ent = -1;
 		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
 		{
+			if (ButtonOnlyDoor(ent) || InButtonOnlyDoor(ent) || EntIndexToEntRef(ent) == g_skipDoor[client])
+				continue;                    // only a button opens it: not a way in from outside
 			float center[3];
 			CenterOf(ent, center);
 			float d = GetVectorDistance(center, target);
@@ -749,7 +802,7 @@ bool ChooseEntry(int client, const float target[3])
 			for (int i = 0; i < 3; i++) { out[i] = center[i] + dir[i] * 64.0; inside[i] = center[i] - dir[i] * 64.0; }
 			out[2] = center[2] - 30.0;
 			inside[2] = center[2] - 30.0;
-			if (Learned_Indoors(out) || !Learned_Indoors(inside))
+			if ((Learned_Indoors(out) && GetGameTime() >= g_forceEntryUntil[client]) || !Learned_Indoors(inside))
 				continue;                   // not a way from outside to inside
 			Address area = NavBotNavMesh.GetNearestNavArea(out, 100.0, false, true);
 			if (area == Address_Null)
@@ -1316,7 +1369,8 @@ int UpdateEntry(int client, NavBot bot, const float me[3], const float target[3]
 	// Whenever we're outside and the survivor is in a house: go in through a window (or a door),
 	// even if we can see them through the glass. Rushing straight at them sends the pathfinder
 	// round to whatever door it knows.
-	if (Learned_Indoors(me) || !Learned_Indoors(target) || GetGameTime() < g_entryCooldown[client])
+	bool forced = GetGameTime() < g_forceEntryUntil[client];
+	if ((Learned_Indoors(me) && !forced) || !Learned_Indoors(target) || GetGameTime() < g_entryCooldown[client])
 	{
 		g_hasEntry[client] = false;
 		return ENTRY_NONE;
@@ -1757,6 +1811,11 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 	int client = bot.Index;
 	if (hitWorld || entity <= MaxClients || !IsValidEntity(entity) || !IsClientInGame(client) || GetClientTeam(client) != TEAM_ZOMBIES)
 		return Plugin_Continue;
+	if (ButtonOnlyDoor(entity))
+	{
+		ForceEntry(client, entity);
+		return Plugin_Handled;
+	}
 	// A hinged door isn't physics: shoving does nothing. Open it with E; if it stays shut
 	// (locked, barred) Doors_Use gives up and we break it as before.
 	if (Doors_IsHinged(entity) && Doors_IsClosed(entity) && !Doors_IsLocked(entity) && Doors_Use(client, bot, entity))
@@ -1917,7 +1976,7 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	}
 
 	// Close and in plain view: go straight for them.
-	if (sees && GetVectorDistance(me, target) < 200.0)
+	if (sees && GetVectorDistance(me, target) < 200.0 && WalkableStraight(me, target))
 	{
 		// Up on a ledge, a bed, a shelf: jump at them (crouched), swinging.
 		float dx = target[0] - me[0], dy = target[1] - me[1];
@@ -2351,6 +2410,11 @@ Action Timer_Think(Handle timer)
 		else if (GetGameTime() - g_stuckSince[client] > 1.5 && EntRefToEntIndex(g_smash[client]) == INVALID_ENT_REFERENCE)
 		{
 			int obstacle = FindObstacle(client);
+			if (obstacle != -1 && ButtonOnlyDoor(obstacle))
+			{
+				ForceEntry(client, obstacle);
+				obstacle = -1;
+			}
 			if (obstacle != -1 && IsFurniture(obstacle))
 				StartShove(client, obstacle);
 			else if (obstacle != -1)
