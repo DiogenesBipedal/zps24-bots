@@ -1816,6 +1816,19 @@ Three things learned on the way:
   400+ units closer, it goes to the bank. After that the normal hunt takes over: windows and
   doors first, roofs through the teacher's climbing routes.
 
+**They climbed out, and jumped straight back in.** Out of the water, a zombie hunting someone
+across the lake took the shortest path, and the shortest path swims. So: out, in, out again,
+looping around the lake. The lake is now **one-way** in the nav mesh. `sm_navwater` (zps24_navdebug)
+finds every connection from a dry area into an area in water (area center + 16 units inside a
+water brush), and `sm_navwater apply` removes them; then `sm_nav_save`. Connections out of the water
+and inside it stay, so swimming out still works. But no path from dry ground leads into a lake,
+so zombies go around over land, to the doors and windows. Done on all four lake maps: 105-245
+connections each. (Removing connections kicks every bot, so it's done on the test server, and
+the main server picks up the saved mesh at the next map load.)
+
+`sm_contents x y z` prints the brush contents at a point (`WATER` or not), to check what counts
+as water.
+
 `sm_zps24zombies_status` shows each zombie's `water` level (0 dry, 1 feet, 2 waist, 3 under).
 So for any map with water: swim out once as the teacher, and the zombies copy it.
 

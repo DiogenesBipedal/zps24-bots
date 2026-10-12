@@ -8,6 +8,8 @@
 //   sm_navfixdrops [apply]           drop-down connections a player can't actually take (a railing
 //                                    or glass on the ledge): list them, or with "apply" remove them
 //                                    (then sm_nav_save to keep the fixed mesh)
+//   sm_navwater [apply]              connections from dry ground into water: list them, or remove
+//                                    them so paths never lead into a lake (getting out still works)
 #include <sourcemod>
 #include <sdktools>
 #include <navbot>
@@ -28,6 +30,8 @@ public void OnPluginStart()
 	RegServerCmd("sm_where", Cmd_Where, "sm_where team: positions of a team's living players");
 	RegServerCmd("sm_navreach", Cmd_NavReach, "sm_navreach x y z x1 y1 z1 x2 y2 z2: which areas in the box are reachable from the area at x y z");
 	RegServerCmd("sm_navfixdrops", Cmd_NavFixDrops, "sm_navfixdrops [apply]: find (and remove) drop-down connections blocked by railings");
+	RegServerCmd("sm_contents", Cmd_Contents, "sm_contents x y z: brush contents at a point");
+	RegServerCmd("sm_navwater", Cmd_NavWater, "sm_navwater [apply]: find (and remove) connections from dry ground into water");
 	RegServerCmd("sm_navseed", Cmd_NavSeed, "sm_navseed x y z: add a walkable seed for (incremental) nav generation");
 }
 
@@ -279,5 +283,60 @@ Action Cmd_NavFixDrops(int args)
 		for (int i = 0; i < found; i++)
 			NavBotNavArea.DisconnectFromAdjacent(fromA[i], toB[i]);
 	PrintToServer("[navfixdrops] %d blocked drop-down connections%s", found, apply ? " removed (sm_nav_save to keep)" : " (sm_navfixdrops apply to remove)");
+	return Plugin_Handled;
+}
+
+bool AreaInWater(Address a)
+{
+	float c[3];
+	NavBotNavArea.GetCenter(a, c);
+	c[2] += 16.0;
+	return (TR_GetPointContents(c) & MASK_WATER) != 0;
+}
+
+Action Cmd_NavWater(int args)
+{
+	char arg[16];
+	GetCmdArg(1, arg, sizeof(arg));
+	bool apply = StrEqual(arg, "apply");
+	float mins[3] = { -32768.0, -32768.0, -32768.0 }, maxs[3] = { 32768.0, 32768.0, 32768.0 };
+	NavBotNavAreaVector v = NavBotNavMesh.CollectAreasOverlappingExtent(mins, maxs);
+	static Address fromA[4096], toB[4096];
+	int found = 0, wet = 0;
+	for (int i = 0; i < v.Size; i++)
+	{
+		Address a = v.At(i);
+		if (AreaInWater(a)) { wet++; continue; }
+		for (int d = 0; d < 4; d++)
+		{
+			int n = NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
+			for (int k = 0; k < n && found < sizeof(fromA); k++)
+			{
+				Address b = NavBotNavArea.GetAdjacentArea(a, view_as<NavBotNavDirType>(d), k);
+				if (!AreaInWater(b))
+					continue;
+				fromA[found] = a;
+				toB[found] = b;
+				found++;
+			}
+		}
+	}
+	PrintToServer("[navwater] %d of %d areas are in water; %d connections lead from dry ground into it", wet, v.Size, found);
+	delete v;
+	if (apply)
+	{
+		for (int i = 0; i < found; i++)
+			NavBotNavArea.DisconnectFromAdjacent(fromA[i], toB[i]);
+		PrintToServer("[navwater] removed them (the ways out of the water stay); sm_nav_save to keep");
+	}
+	return Plugin_Handled;
+}
+
+Action Cmd_Contents(int args)
+{
+	float p[3];
+	for (int i = 0; i < 3; i++) p[i] = ArgF(i + 1);
+	int c = TR_GetPointContents(p);
+	PrintToServer("[contents] %.0f %.0f %.0f: 0x%x%s", p[0], p[1], p[2], c, (c & MASK_WATER) ? " WATER" : "");
 	return Plugin_Handled;
 }
