@@ -49,7 +49,7 @@ ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOp
 bool  g_builder[MAXPLAYERS + 1];
 int   g_buildLesson[MAXPLAYERS + 1] = { -1, ... };
 int   g_buildTries[MAXPLAYERS + 1];
-int   g_dropTries[MAXPLAYERS + 1];
+int   g_dropTries[MAXPLAYERS + 1];          // "dropweapon" sent for the melee weapon in hand
 int   g_buildScan[MAXPLAYERS + 1];   // which aim offset DoBuild is trying
 int   g_buildAmmo[MAXPLAYERS + 1];   // boards carried when the hammering started
 float g_nextNail[MAXPLAYERS + 1];
@@ -59,7 +59,7 @@ float g_closeUntil[MAXPLAYERS + 1];
 bool  g_closeWalking[MAXPLAYERS + 1];
 int   g_breakDoor[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // basement door being smashed
 float g_breakUntil[MAXPLAYERS + 1];
-float g_nextSwing[MAXPLAYERS + 1];         // "dropweapon" sent for the melee weapon in hand
+float g_nextSwing[MAXPLAYERS + 1];         // next melee swing at the basement door
 int   g_hammerFails[MAXPLAYERS + 1];       // offered the hammer and still don't have it
 int   g_spawnedHammer[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 float g_buildRecheck[MAXPLAYERS + 1];
