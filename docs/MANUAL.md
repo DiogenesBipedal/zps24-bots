@@ -2016,10 +2016,10 @@ for somewhere to back off to, and defend spots within 40 units of an edge with n
 (`AtEdge`: nothing solid at step height, then a drop) are left out unless the teacher held them.
 
 **Church basement.** Survivors leave it alone: church has `"prefer" "up"` in
-`configs/zps24_maps.cfg`, so no hold or patrol spots below the ground floor. When a survivor's
-path does run into the basement door, it breaks it the way the teacher does: **crouched, melee,
-hit after hit** (separate swings every 0.5 s; bare hands without a melee weapon). Shooting it was
-tried and dropped: bullets don't break it.
+`configs/zps24_maps.cfg`, so no hold or patrol spots below the ground floor. A survivor that can see an intact basement door within 400 units
+(and no zombie within 300) **shoots it** until it breaks, every time (the teacher's final word,
+after trying crouch-and-melee); melee, crouched, only without a gun. Waiting until a door was
+"in the way" never happened: the nav paths go round these doors.
 
 ## 12. The Windows port
 

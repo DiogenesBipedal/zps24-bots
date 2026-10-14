@@ -1507,6 +1507,30 @@ bool IsBasementDoor(int client, int ent)
 	return c[2] < ground - 60.0;
 }
 
+int BasementDoorNear(int client, float radius)
+{
+	float me[3], c[3];
+	GetClientAbsOrigin(client, me);
+	int best = -1;
+	float bestDist = radius;
+	int e = -1;
+	while ((e = FindEntityByClassname(e, "func_breakable")) != -1)
+	{
+		EntityCenter(e, c);
+		float d = GetVectorDistance(me, c);
+		if (d >= bestDist || !IsBasementDoor(client, e))
+			continue;
+		float eye[3];
+		GetClientEyePosition(client, eye);
+		TR_TraceRayFilter(eye, c, MASK_SHOT, RayType_EndPoint, TraceIgnoreSelf, client);
+		if (TR_DidHit() && TR_GetEntityIndex() != e)
+			continue;                 // can't see it from here
+		bestDist = d;
+		best = e;
+	}
+	return best;
+}
+
 // Smash the basement door in the way with a melee weapon (bare hands if none), until it breaks.
 // Returns true while busy.
 bool BreakBasementDoor(int client, NavBot bot)
@@ -1522,7 +1546,15 @@ bool BreakBasementDoor(int client, NavBot bot)
 	GetClientEyePosition(client, eye);
 	Address ctrl = bot.GetPlayerControllerInterface();
 	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Breaking the basement door");
-	// Crouched, melee, hit after hit (the main player: that's what breaks it; bullets don't).
+	// Shoot it, every time (the main player); melee, crouched, only without a gun.
+	if (IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
+	{
+		if (GetVectorDistance(eye, c) > 400.0)
+			NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
+		else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.1);
+		return true;
+	}
 	NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_CROUCH, 0.3);
 	int melee = MeleeWeapon(client);
 	int weapon = melee != -1 ? melee : FindOwnedWeapon(client, "weapon_emptyhand");
@@ -1787,6 +1819,16 @@ bool DoBuild(int client, NavBot bot, float moveGoal[3])
 	if (GetGameTime() < g_hammerUntil[client])
 	{
 		g_handsUntil[client] = GetGameTime() + 1.5;   // HoldBestGun: keep the hammer out
+		// A board used up: it's going up. No more clicks (another click takes your own board back
+		// down); keep the hammer out while it's nailed on, then done.
+		int carried = GetEntProp(client, Prop_Send, "m_iAmmo", _, 7) + GetEntProp(tool, Prop_Send, "m_iClip1");
+		if (carried < g_buildAmmo[client])
+		{
+			if (g_hammerUntil[client] - GetGameTime() > 3.0)
+				g_hammerUntil[client] = GetGameTime() + 3.0;
+			g_clickUntil[client] = 0.0;
+			return false;
+		}
 		// Separate clicks, one per nail: a held button only counts once.
 		if (GetGameTime() >= g_nextNail[client])
 		{
@@ -2533,6 +2575,20 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		strcopy(g_state[client], sizeof(g_state[]), "closing a door: pressing E");
 		g_us_wantMove[client] = false;
 		return Plugin_Continue;
+	}
+
+	// Next to an intact basement door (church): break it, crouched, melee. The nav paths go round
+	// these doors, so waiting for one to be "in the way" never happened.
+	if (EntRefToEntIndex(g_breakDoor[client]) == INVALID_ENT_REFERENCE && GetGameTime() > g_breakUntil[client] + 2.0)
+	{
+		int near = BasementDoorNear(client, 400.0);
+		float zd;
+		if (near != -1 && NearestZombie(client, 300.0, zd) == 0)
+		{
+			g_breakDoor[client] = EntIndexToEntRef(near);
+			g_breakUntil[client] = GetGameTime() + 25.0;
+			Debug("%N is at basement door %d: breaking it", client, near);
+		}
 	}
 
 	// A basement door in the way: break it (melee).
