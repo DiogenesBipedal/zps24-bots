@@ -2017,8 +2017,9 @@ for somewhere to back off to, and defend spots within 40 units of an edge with n
 
 **Church basement.** Survivors leave it alone: church has `"prefer" "up"` in
 `configs/zps24_maps.cfg`, so no hold or patrol spots below the ground floor. When a survivor's
-path does run into the basement door, it shoots it open with its gun from up to 400 units away
-(the teacher: "just shoot it up, that's easier"); melee, walking up to it, only without a gun.
+path does run into the basement door, it breaks it the way the teacher does: **crouched, melee,
+hit after hit** (separate swings every 0.5 s; bare hands without a melee weapon). Shooting it was
+tried and dropped: bullets don't break it.
 
 ## 12. The Windows port
 

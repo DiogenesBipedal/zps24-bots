@@ -58,7 +58,8 @@ int   g_closeBtn[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // Close bu
 float g_closeUntil[MAXPLAYERS + 1];
 bool  g_closeWalking[MAXPLAYERS + 1];
 int   g_breakDoor[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // basement door being smashed
-float g_breakUntil[MAXPLAYERS + 1];         // "dropweapon" sent for the melee weapon in hand
+float g_breakUntil[MAXPLAYERS + 1];
+float g_nextSwing[MAXPLAYERS + 1];         // "dropweapon" sent for the melee weapon in hand
 int   g_hammerFails[MAXPLAYERS + 1];       // offered the hammer and still don't have it
 int   g_spawnedHammer[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 float g_buildRecheck[MAXPLAYERS + 1];
@@ -1521,15 +1522,8 @@ bool BreakBasementDoor(int client, NavBot bot)
 	GetClientEyePosition(client, eye);
 	Address ctrl = bot.GetPlayerControllerInterface();
 	NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.4, "Breaking the basement door");
-	// Shoot it up (the main player: "that's easier"); melee only without a gun.
-	if (IsGun(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")))
-	{
-		if (GetVectorDistance(eye, c) > 400.0)
-			NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
-		else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
-			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.1);
-		return true;
-	}
+	// Crouched, melee, hit after hit (the main player: that's what breaks it; bullets don't).
+	NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_CROUCH, 0.3);
 	int melee = MeleeWeapon(client);
 	int weapon = melee != -1 ? melee : FindOwnedWeapon(client, "weapon_emptyhand");
 	if (weapon != -1 && GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != weapon && GetGameTime() >= g_nextUse[client])
@@ -1543,8 +1537,11 @@ bool BreakBasementDoor(int client, NavBot bot)
 	g_handsUntil[client] = GetGameTime() + 2.0;   // HoldBestGun: not now
 	if (GetVectorDistance(eye, c) > 70.0)
 		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
-	else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl))
-		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.2);
+	else if (NavBotPlayerControllerInterface.IsAimOnTarget(ctrl) && GetGameTime() >= g_nextSwing[client])
+	{
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.15);
+		g_nextSwing[client] = GetGameTime() + 0.5;   // separate swings, again and again
+	}
 	return true;
 }
 
