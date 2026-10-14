@@ -1930,6 +1930,14 @@ OnPressed opens (or toggles) a door or closes one, and which door. On cabin: 6 o
   same floor) walks to the button and presses E until the door starts closing (state "closing a
   door"). It gives up if zombies get within 250 units of the button.
 
+**"Zombies can't break through the wooden door."** The side door is a func_door_rotating with 0 hp;
+what breaks is the 2000 hp wooden func_breakable built into it. A zombie at it pressed E twice
+(nothing), skipped it for 10 s and went round. Now, when E won't open a door (or a zombie gets
+stuck on one), it smashes the door's breakable part (`DoorPart`: a func_breakable or physbox
+parented to the door, or within 60 units of it). Also, the horde's gathering point had landed
+inside the garage, behind the closed big doors. It is now always outdoors: 800, 1000, then 1200
+units out from the survivors, until a nav area there is under the open sky.
+
 Tried and dropped along the way: ranking entrances by toughness (it turned zombies away from the
 wooden door, which is the right way in here), and pressing the button through the broken glass
 ("they can't reach that button"). Kept: after one pane of a stacked window breaks, the zombie

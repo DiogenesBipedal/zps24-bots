@@ -1789,6 +1789,7 @@ bool DoBuild(int client, NavBot bot, float moveGoal[3])
 	}
 	if (GetGameTime() < g_hammerUntil[client])
 	{
+		g_handsUntil[client] = GetGameTime() + 1.5;   // HoldBestGun: keep the hammer out
 		// Separate clicks, one per nail: a held button only counts once.
 		if (GetGameTime() >= g_nextNail[client])
 		{
@@ -3022,10 +3023,20 @@ public void OnPluginEnd()
 // A builder's hammer click goes straight into its usercmd.
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
-	if (client > 0 && client <= MaxClients && GetGameTime() < g_clickUntil[client] && IsFakeClient(client))
+	if (client < 1 || client > MaxClients || !IsFakeClient(client))
+		return Plugin_Continue;
+	Action r = Plugin_Continue;
+	// Hammering: no switching weapons (NavBot's own weapon choice put the hammer away right after
+	// the click, which cancels the board).
+	if (GetGameTime() < g_hammerUntil[client] + 1.0 && weapon != 0)
+	{
+		weapon = 0;
+		r = Plugin_Changed;
+	}
+	if (GetGameTime() < g_clickUntil[client])
 	{
 		buttons |= IN_ATTACK;
-		return Plugin_Changed;
+		r = Plugin_Changed;
 	}
-	return Plugin_Continue;
+	return r;
 }

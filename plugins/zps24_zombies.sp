@@ -298,10 +298,27 @@ void UpdateWave()
 			if (GetVectorLength(dir) < 1.0) dir[0] = 1.0;
 			NormalizeVector(dir, dir);
 			ScaleVector(dir, 800.0);
-			float want[3];
-			AddVectors(sc, dir, want);
-			want[2] = zc[2];
-			Address a = NavBotNavMesh.GetNearestNavArea(want, 600.0, false, true);
+			// Out in the open (not inside the survivors' building, as happened in cabin's garage):
+			// further out until it's under the sky.
+			float want[3], unit[3];
+			unit = dir;
+			NormalizeVector(unit, unit);
+			Address a = Address_Null;
+			for (float far = 800.0; far <= 1200.0; far += 200.0)
+			{
+				for (int i = 0; i < 2; i++) want[i] = sc[i] + unit[i] * far;
+				want[2] = zc[2];
+				a = NavBotNavMesh.GetNearestNavArea(want, 400.0, false, true);
+				if (a != Address_Null)
+				{
+					float ac[3];
+					NavBotNavArea.GetCenter(a, ac);
+					ac[2] += 30.0;
+					if (!Learned_Indoors(ac))
+						break;
+				}
+				a = Address_Null;
+			}
 			if (a == Address_Null)
 				a = NavBotNavMesh.GetNearestNavArea(zc, 600.0, false, true);
 			g_stageValid = a != Address_Null;
@@ -753,6 +770,31 @@ bool EnteringBuilding(int client)
 	float now = GetGameTime();
 	return g_hasEntry[client] || now < g_entryInUntil[client] || now < g_entrySmashUntil[client]
 		|| EntRefToEntIndex(g_btn[client]) != INVALID_ENT_REFERENCE;
+}
+
+// The breakable part of a door: a func_breakable / physbox parented to it, or right on it.
+int DoorPart(int door)
+{
+	static const char parts[][] = { "func_breakable", "func_physbox", "func_physbox_multiplayer" };
+	float dc[3];
+	CenterOf(door, dc);
+	int best = -1;
+	float bestDist = 60.0;
+	for (int k = 0; k < sizeof(parts); k++)
+	{
+		int p = -1;
+		while ((p = FindEntityByClassname(p, parts[k])) != -1)
+		{
+			if (EntHealth(p) <= 0)
+				continue;
+			int parent = HasEntProp(p, Prop_Data, "m_hMoveParent") ? GetEntPropEnt(p, Prop_Data, "m_hMoveParent") : -1;
+			float pc[3];
+			CenterOf(p, pc);
+			float d = parent == door ? 0.0 : GetVectorDistance(pc, dc);
+			if (d < bestDist) { bestDist = d; best = p; }
+		}
+	}
+	return best;
 }
 
 bool ButtonOnlyDoor(int ent)
@@ -2110,6 +2152,20 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 	// (locked, barred) Doors_Use gives up and we break it as before.
 	if (Doors_IsHinged(entity) && Doors_IsClosed(entity) && !Doors_IsLocked(entity) && Doors_Use(client, bot, entity))
 		return Plugin_Handled;
+	// E won't open it: smash the breakable panel built into it (cabin's garage side door: a 2000 hp
+	// wooden func_breakable on a 0 hp door).
+	if (Doors_IsHinged(entity) && EntRefToEntIndex(g_smash[client]) == INVALID_ENT_REFERENCE)
+	{
+		int part = DoorPart(entity);
+		if (part != -1 && !IsIgnored(client, part))
+		{
+			g_smash[client] = EntIndexToEntRef(part);
+			g_smashUntil[client] = GetGameTime() + 6.0;
+			g_smashHealth[client] = EntHealth(part);
+			Debug("%N breaks the door's panel %d (%d hp)", client, part, EntHealth(part));
+			return Plugin_Handled;
+		}
+	}
 	if (IsFurniture(entity) && !IsIgnored(client, entity))
 	{
 		StartShove(client, entity);
@@ -2705,6 +2761,11 @@ Action Timer_Think(Handle timer)
 			{
 				ForceEntry(client, obstacle);
 				obstacle = -1;
+			}
+			if (obstacle != -1 && Doors_IsHinged(obstacle) && EntHealth(obstacle) <= 0)
+			{
+				int part = DoorPart(obstacle);
+				obstacle = part != -1 && !IsIgnored(client, part) ? part : obstacle;   // the door's breakable panel
 			}
 			if (obstacle != -1 && IsFurniture(obstacle))
 				StartShove(client, obstacle);
