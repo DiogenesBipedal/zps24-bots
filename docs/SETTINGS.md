@@ -206,3 +206,5 @@ so not every area is reachable from the start; that's expected.
 | `STEAMCMD` | `install.sh` | `~/.local/share/steamcmd` | Where SteamCMD lives (downloaded if missing) |
 | `ZPS24_CLIENT` | `radio-import.sh` | Steam's ZPS folder | Your local ZPS install, so you don't have to download the tracks |
 | `WORK` | `build.sh`, `install.sh`, `package.sh` | `~/zps24-dev` | Source build folder |
+
+| `sm_zps24ai_patrol` | `0.3` | Share of survivor bots that patrol between spots, on maps without their own "patrol" setting in configs/zps24_maps.cfg |

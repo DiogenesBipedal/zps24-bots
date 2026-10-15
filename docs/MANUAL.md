@@ -2021,6 +2021,23 @@ for somewhere to back off to, and defend spots within 40 units of an edge with n
 after trying crouch-and-melee); melee, crouched, only without a gun. Waiting until a door was
 "in the way" never happened: the nav paths go round these doors.
 
+### 11.21 Survival: first aid, regrouping, patrols on every map
+
+- **First aid** (the teacher: "very important"). ZPS 2.4's first aid is `item_healthkit` (and the
+  small `item_healthvial`) lying around the map, healing on pick-up (E). A survivor bot under 70 hp
+  with no zombie within 400 units, or under 40 with the kit nearer than the nearest zombie, takes
+  the nearest kit within 900 units on its floor that no other bot is going for, walks to it (safest
+  route), aims at it and presses E until it's gone. It stops once healed to 90. State: "going for
+  first aid" / "picking up first aid". Cabin has 9 kits and 3 vials.
+- **Regroup when badly hurt.** Under 35 hp and falling back from a zombie: run to the nearest
+  survivor who has two others within 300 units (within 1200, not past the zombie, not over a drop),
+  instead of the farthest free spot ("hurt: falling back to the others").
+- **Patrols on every map.** `sm_zps24ai_patrol` (default 0.3): the share of survivor bots that
+  patrol on maps without their own `"patrol"` in `configs/zps24_maps.cfg` (cinema keeps its 0.5).
+- **Better patrol stops.** Among the free spots 250-1500 units away, a patroller prefers a watch
+  post over one of its home's doors or windows (in sight, 150-600 units away: not hugging it, +200)
+  with another survivor within 700 units for cover (+120), plus a little randomness.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

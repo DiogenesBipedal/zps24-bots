@@ -42,6 +42,7 @@ public Plugin myinfo =
 #define MAX_OPENINGS   64
 
 ConVar g_giveWeapons, g_infiniteAmmo, g_needTool, g_engageRange;
+ConVar g_patrol;
 ConVar g_enable, g_equipTime, g_radius, g_safeDist, g_barricaders, g_boardsPerOpening, g_debug, g_upperHeight, g_furniture, g_learnedStyle, g_builders;
 
 // Builders: a few survivor bots per house that trade their melee weapon for the barricade hammer
@@ -53,7 +54,10 @@ int   g_dropTries[MAXPLAYERS + 1];          // "dropweapon" sent for the melee w
 int   g_buildScan[MAXPLAYERS + 1];   // which aim offset DoBuild is trying
 int   g_buildAmmo[MAXPLAYERS + 1];   // boards carried when the hammering started
 float g_nextNail[MAXPLAYERS + 1];
-float g_clickUntil[MAXPLAYERS + 1];  // a builder's left click, held until then
+float g_clickUntil[MAXPLAYERS + 1];
+int   g_aidKit[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // first aid we're going for
+float g_aidCheck[MAXPLAYERS + 1];
+bool  g_aidWalking[MAXPLAYERS + 1];  // a builder's left click, held until then
 int   g_closeBtn[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // Close button we're going to press
 float g_closeUntil[MAXPLAYERS + 1];
 bool  g_closeWalking[MAXPLAYERS + 1];
@@ -188,6 +192,7 @@ public void OnPluginStart()
 	g_safeDist         = CreateConVar("sm_zps24ai_safe_distance", "260", "Bots with guns back away from zombies closer than this");
 	g_barricaders      = CreateConVar("sm_zps24ai_barricaders", "2", "How many survivor bots barricade the ground floor at once (0 = off)");
 	g_boardsPerOpening = CreateConVar("sm_zps24ai_boards", "3", "Boards to put on each door/window");
+	g_patrol           = CreateConVar("sm_zps24ai_patrol", "0.3", "Share of survivor bots that patrol between spots on maps without their own \"patrol\" setting (configs/zps24_maps.cfg)");
 	g_debug            = CreateConVar("sm_zps24ai_debug", "0", "Log AI decisions");
 	g_upperHeight      = CreateConVar("sm_zps24ai_upper_height", "80", "Nav areas this much above the hold-out floor count as upper floor / roof / balcony");
 	g_builders         = CreateConVar("sm_zps24ai_builders", "2", "Survivor bots (in total, at most one per house) that swap their melee weapon for the barricade hammer and nail boards where the main player nailed them (0 = off)");
@@ -227,7 +232,7 @@ void LoadMapConfig()
 	g_mapRadius = 0.0;
 	g_mapPreferUp = false;
 	g_mapSpread = false;
-	g_mapPatrol = 0.0;
+	g_mapPatrol = -1.0;                  // not set: sm_zps24ai_patrol
 	char path[PLATFORM_MAX_PATH], map[64];
 	BuildPath(Path_SM, path, sizeof(path), "configs/zps24_maps.cfg");
 	GetCurrentMap(map, sizeof(map));
@@ -243,7 +248,7 @@ void LoadMapConfig()
 		kv.GetString("prefer", prefer, sizeof(prefer), "both");
 		g_mapPreferUp = StrEqual(prefer, "up");
 		g_mapSpread = kv.GetNum("spread", 0) != 0;
-		g_mapPatrol = kv.GetFloat("patrol", 0.0);
+		g_mapPatrol = kv.GetFloat("patrol", -1.0);
 		if (g_mapHome)
 			LogMessage("%s: survivors hold out at %.0f %.0f %.0f (from configs/zps24_maps.cfg)", map, g_mapHomePos[0], g_mapHomePos[1], g_mapHomePos[2]);
 	}
@@ -2515,6 +2520,13 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	{
 		float them[3];
 		GetClientAbsOrigin(zombie, them);
+		// Badly hurt: back to the others (2+ survivors together within 1200), not off alone.
+		if (GetClientHealth(client) < 35 && GroupSpot(client, them, moveGoal) && !DropAlong(me, moveGoal))
+		{
+			routeType = NAVBOT_FASTEST_ROUTE;
+			strcopy(g_state[client], sizeof(g_state[]), "hurt: falling back to the others");
+			return MoveTo(client, moveGoal);
+		}
 		// Fall back inside the hold-out: the defend spot farthest from the zombie, if it's a real
 		// step back; otherwise the best open direction away from it.
 		int best = -1;
@@ -2665,6 +2677,20 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		return Hold(client);
 	}
 
+	// Hurt: first aid (the main player: very important).
+	if (SeekFirstAid(client, bot, moveGoal))
+	{
+		if (g_aidWalking[client])
+		{
+			strcopy(g_state[client], sizeof(g_state[]), "going for first aid");
+			routeType = NAVBOT_SAFEST_ROUTE;
+			return MoveTo(client, moveGoal);
+		}
+		strcopy(g_state[client], sizeof(g_state[]), "picking up first aid");
+		g_us_wantMove[client] = false;
+		return Plugin_Continue;
+	}
+
 	// Defend: hold a spot (upper floor / roof / balcony / corner), move to another one every
 	// 25-45 s, and keep turning to watch different doors and windows.
 	int h = g_home[client];
@@ -2756,7 +2782,8 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 // so the same bots all round) walks from spot to spot instead of holding one.
 bool IsPatroller(int client)
 {
-	return g_mapPatrol > 0.0 && float((client * 37) % 100) < g_mapPatrol * 100.0;
+	float share = g_mapPatrol >= 0.0 ? g_mapPatrol : g_patrol.FloatValue;
+	return share > 0.0 && float((client * 37) % 100) < share * 100.0;
 }
 
 // Next patrol stop: a free spot 250-1500 units from where we are (another room or floor), so the
@@ -2777,7 +2804,157 @@ int PickPatrolSpot(int client, int h)
 		if (!taken)
 			pick[n++] = i;
 	}
-	return n > 0 ? pick[GetRandomInt(0, n - 1)] : PickFreeSpot(client, h, g_defendCount[h]);
+	if (n == 0)
+		return PickFreeSpot(client, h, g_defendCount[h]);
+	// Best stops: a watch post over one of the home's doors or windows (in sight, 150-600 away,
+	// not hugging it) with another survivor within 700 for cover. A bit of randomness so the
+	// patrol varies.
+	int best = pick[0];
+	float bestScore = -999999.0;
+	for (int j = 0; j < n; j++)
+	{
+		float sp[3], eye[3];
+		sp = g_defendPos[h][pick[j]];
+		eye = sp;
+		eye[2] += 60.0;
+		float score = GetRandomFloat(0.0, 150.0);
+		for (int o = 0; o < g_openingCount; o++)
+		{
+			if (g_openingHome[o] != h)
+				continue;
+			float d = GetVectorDistance(sp, g_openingPos[o]);
+			if (d < 150.0 || d > 600.0)
+				continue;
+			TR_TraceRayFilter(eye, g_openingPos[o], MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnlyS);
+			if (!TR_DidHit() || GetVectorDistance(eye, g_openingPos[o]) * TR_GetFraction() > d - 40.0)
+			{
+				score += 200.0;      // watches an entrance
+				break;
+			}
+		}
+		if (AlliesNear(client, sp, 700.0) > 0)
+			score += 120.0;          // someone covering
+		if (score > bestScore) { bestScore = score; best = pick[j]; }
+	}
+	return best;
+}
+
+// First aid: a health kit or vial lying around (ZPS 2.4 heals on pick-up, E). Under 70 hp with no
+// zombie within 400, or under 40 with the kit nearer than the nearest zombie. One bot per kit.
+bool SeekFirstAid(int client, NavBot bot, float moveGoal[3])
+{
+	int hp = GetClientHealth(client);
+	int kit = EntRefToEntIndex(g_aidKit[client]);
+	if (hp >= 90 || (kit == INVALID_ENT_REFERENCE && hp >= 70))
+	{
+		g_aidKit[client] = INVALID_ENT_REFERENCE;
+		return false;
+	}
+	float me[3], zd;
+	GetClientAbsOrigin(client, me);
+	int z = NearestZombie(client, 1500.0, zd);
+	if (kit == INVALID_ENT_REFERENCE || GetEntPropEnt(kit, Prop_Send, "m_hOwnerEntity") != -1)
+	{
+		if (GetGameTime() < g_aidCheck[client])
+			return false;
+		g_aidCheck[client] = GetGameTime() + 2.0;
+		static const char kits[][] = { "item_healthkit", "item_healthvial" };
+		kit = -1;
+		float best = 900.0;
+		for (int k = 0; k < sizeof(kits); k++)
+		{
+			int e = -1;
+			while ((e = FindEntityByClassname(e, kits[k])) != -1)
+			{
+				float p[3];
+				GetEntPropVector(e, Prop_Data, "m_vecAbsOrigin", p);
+				float d = GetVectorDistance(me, p);
+				if (d >= best || FloatAbs(p[2] - me[2]) > 200.0 || (GetEntProp(e, Prop_Send, "m_fEffects") & 32))
+					continue;            // too far, another floor, or taken (EF_NODRAW: respawning)
+				bool claimed = false;
+				for (int i = 1; i <= MaxClients && !claimed; i++)
+					claimed = i != client && g_aidKit[i] == EntIndexToEntRef(e);
+				if (claimed)
+					continue;
+				best = d;
+				kit = e;
+			}
+		}
+		if (kit == -1)
+			return false;
+		bool calm = z == 0 || zd > 400.0;
+		if (!calm && !(hp < 40 && best < zd))
+			return false;
+		g_aidKit[client] = EntIndexToEntRef(kit);
+		Debug("%N (%d hp) goes for first aid %d", client, hp, kit);
+	}
+	float p[3];
+	GetEntPropVector(kit, Prop_Data, "m_vecAbsOrigin", p);
+	if (GetEntProp(kit, Prop_Send, "m_fEffects") & 32)
+	{
+		g_aidKit[client] = INVALID_ENT_REFERENCE;   // someone took it
+		return false;
+	}
+	if (GetVectorDistance(me, p) > 48.0)
+	{
+		Address a = NavBotNavMesh.GetNearestNavArea(p, 120.0, false, true);
+		if (a != Address_Null)
+			NavBotNavArea.GetClosestPointOnArea(a, p, moveGoal);
+		else
+			moveGoal = p;
+		g_aidWalking[client] = true;
+		if (GetVectorDistance(me, moveGoal) > 24.0)
+			return true;
+	}
+	g_aidWalking[client] = false;
+	Address ctrl = bot.GetPlayerControllerInterface();
+	NavBotPlayerControllerInterface.AimAtPos(ctrl, p, LOOK_PRIORITY, 0.3, "First aid");
+	NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), p, 100);
+	if (GetGameTime() >= g_nextUse[client])
+	{
+		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.2);
+		g_nextUse[client] = GetGameTime() + 0.6;
+	}
+	return true;
+}
+
+// Where a hurt bot runs to: the survivor with the most company (another within 300), nearest,
+// within 1200, not past the zombie.
+bool GroupSpot(int client, const float them[3], float out[3])
+{
+	float me[3], p[3];
+	GetClientAbsOrigin(client, me);
+	int best = 0;
+	float bestScore = 999999.0;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (i == client || !IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_SURVIVORS)
+			continue;
+		GetClientAbsOrigin(i, p);
+		float d = GetVectorDistance(me, p);
+		if (d > 1200.0 || GetVectorDistance(p, them) < d * 0.6 || AlliesNear(client, p, 300.0) < 2)
+			continue;                     // too far, the zombie's in the way, or alone
+		if (d < bestScore) { bestScore = d; best = i; }
+	}
+	if (best == 0)
+		return false;
+	GetClientAbsOrigin(best, out);
+	return true;
+}
+
+int AlliesNear(int client, const float pos[3], float radius)
+{
+	int n = 0;
+	float p[3];
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (i == client || !IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_SURVIVORS)
+			continue;
+		GetClientAbsOrigin(i, p);
+		if (GetVectorDistance(p, pos) < radius)
+			n++;
+	}
+	return n;
 }
 
 // A random one of the home's best `top` spots that no other bot of the home holds, so they spread
