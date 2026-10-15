@@ -109,6 +109,11 @@ int g_drySize[COMP_MAX_ID];
 // Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
 // staging point out of their sight, then rush together.
 ConVar g_waves;
+float g_smashStarted[MAXPLAYERS + 1];  // when we started on the current obstacle
+// Survivor barricades under attack: zombies nearby whose survivor is inside come and help.
+#define ASSAULT_MAX 8
+int   g_assault[ASSAULT_MAX] = { INVALID_ENT_REFERENCE, ... };
+float g_assaultUntil[ASSAULT_MAX];
 int   g_relinked[64];                  // button-only doors already linked through once open
 int   g_relinkedCount;
 float g_forceEntryUntil[MAXPLAYERS + 1];   // ran into a button-only door: find a way in instead
@@ -770,6 +775,83 @@ bool EnteringBuilding(int client)
 	float now = GetGameTime();
 	return g_hasEntry[client] || now < g_entryInUntil[client] || now < g_entrySmashUntil[client]
 		|| EntRefToEntIndex(g_btn[client]) != INVALID_ENT_REFERENCE;
+}
+
+bool IsSurvivorBoard(int ent)
+{
+	if (!IsValidEntity(ent) || !HasEntProp(ent, Prop_Data, "m_ModelName"))
+		return false;
+	char model[128];
+	GetEntPropString(ent, Prop_Data, "m_ModelName", model, sizeof(model));
+	return StrContains(model, "barricades/barricade_", false) != -1 && StrContains(model, "chunk") == -1 && StrContains(model, "splinter") == -1;
+}
+
+void CallForHelp(int client, int obstacle)
+{
+	if (!IsSurvivorBoard(obstacle))
+		return;
+	int ref = EntIndexToEntRef(obstacle), free = -1;
+	for (int k = 0; k < ASSAULT_MAX; k++)
+	{
+		if (g_assault[k] == ref) { g_assaultUntil[k] = GetGameTime() + 15.0; return; }
+		if (free == -1 && (EntRefToEntIndex(g_assault[k]) == INVALID_ENT_REFERENCE || GetGameTime() > g_assaultUntil[k]))
+			free = k;
+	}
+	if (free == -1)
+		return;
+	g_assault[free] = ref;
+	g_assaultUntil[free] = GetGameTime() + 15.0;
+	Debug("%N calls the horde to barricade %d", client, obstacle);
+}
+
+// Help break a barricade under attack within 700 units, if our survivor is inside that building
+// (within 600 of it, under a roof). Spread round it: each helper takes its own side.
+int JoinAssault(int client, const float me[3], float moveGoal[3])
+{
+	if (!IsLiveSurvivor(g_target[client]) || EnteringBuilding(client))
+		return ENTRY_NONE;
+	float t[3];
+	GetClientAbsOrigin(g_target[client], t);
+	if (!Learned_Indoors(t))
+		return ENTRY_NONE;
+	int board = -1;
+	float bestDist = 700.0;
+	for (int k = 0; k < ASSAULT_MAX; k++)
+	{
+		int b = EntRefToEntIndex(g_assault[k]);
+		if (b == INVALID_ENT_REFERENCE || GetGameTime() > g_assaultUntil[k] || EntHealth(b) <= 0)
+			continue;
+		float bc[3];
+		CenterOf(b, bc);
+		float d = GetVectorDistance(me, bc);
+		if (d < bestDist && GetVectorDistance(bc, t) < 600.0) { bestDist = d; board = b; }
+	}
+	if (board == -1)
+		return ENTRY_NONE;
+	float bc[3], eye[3];
+	CenterOf(board, bc);
+	GetClientEyePosition(client, eye);
+	if (GetVectorDistance(eye, bc) < 80.0)
+	{
+		g_smash[client] = EntIndexToEntRef(board);
+		g_smashUntil[client] = GetGameTime() + 4.0;
+		g_smashHealth[client] = EntHealth(board);
+		g_smashStarted[client] = GetGameTime();
+		return ENTRY_STEER;
+	}
+	// Our side of it (the side we're on), a little apart from the others.
+	float dir[3];
+	SubtractVectors(me, bc, dir);
+	dir[2] = 0.0;
+	NormalizeVector(dir, dir);
+	float sideways = float((client % 3) - 1) * 28.0;
+	moveGoal[0] = bc[0] + dir[0] * 50.0 - dir[1] * sideways;
+	moveGoal[1] = bc[1] + dir[1] * 50.0 + dir[0] * sideways;
+	moveGoal[2] = me[2];
+	Address a = NavBotNavMesh.GetNearestNavArea(moveGoal, 120.0, false, true);
+	if (a != Address_Null)
+		NavBotNavArea.GetClosestPointOnArea(a, moveGoal, moveGoal);
+	return ENTRY_PATH;
 }
 
 // The breakable part of a door: a func_breakable / physbox parented to it, or right on it.
@@ -2206,6 +2288,13 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 
 	// Smashing an obstacle: stand still, aim at it and swing.
 	int obstacle = EntRefToEntIndex(g_smash[client]);
+	if (obstacle != INVALID_ENT_REFERENCE && GetGameTime() >= g_smashUntil[client] && EntHealth(obstacle) > 0
+		&& EntHealth(obstacle) < g_smashHealth[client] && GetGameTime() < g_smashStarted[client] + 30.0)
+	{
+		// It's giving: keep at it (a board that's losing health breaks, a 4 s limit gave up on it).
+		g_smashHealth[client] = EntHealth(obstacle);
+		g_smashUntil[client] = GetGameTime() + 4.0;
+	}
 	if (obstacle != INVALID_ENT_REFERENCE && GetGameTime() >= g_smashUntil[client])
 	{
 		// Time's up: if it took no damage, it can't be broken this way. Forget it and go around.
@@ -2226,9 +2315,22 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		CenterOf(obstacle, c);
 		NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.5, "Smashing barricade");
 		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.3);
+		if (g_smashStarted[client] == 0.0)
+			g_smashStarted[client] = GetGameTime();
+		CallForHelp(client, obstacle);      // a survivor barricade: the others pile in
 		return Plugin_Continue;
 	}
 	g_smash[client] = INVALID_ENT_REFERENCE;
+	g_smashStarted[client] = 0.0;
+
+	// Someone's breaking a survivors' barricade near here and our survivor is inside: help.
+	{
+		float me0[3];
+		GetClientAbsOrigin(client, me0);
+		int help = JoinAssault(client, me0, moveGoal);
+		if (help == ENTRY_STEER) { g_us_wantMove[client] = false; return Plugin_Continue; }
+		if (help == ENTRY_PATH) { routeType = NAVBOT_FASTEST_ROUTE; Unstick_WantMove(client, me0, moveGoal); return Plugin_Changed; }
+	}
 
 	// Setting up a step the main player built (a car under the roof edge)?
 	bool walking;
@@ -2369,6 +2471,32 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		g_blockedSince[client] = 0.0;
 
 	moveGoal = g_goal[client];
+	// Several of us after the same survivor in the open: come at them from different sides
+	// (72 degrees apart, about 90 units out), not in a queue; straight in from 150.
+	float dist = GetVectorDistance(me, target);
+	if (sees && dist > 150.0 && dist < 700.0)
+	{
+		int rank = 0, count = 0;
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (!IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES || g_target[i] != g_target[client])
+				continue;
+			count++;
+			if (i < client) rank++;
+		}
+		if (count >= 2)
+		{
+			float base = ArcTangent2(me[1] - target[1], me[0] - target[0]);
+			float ang = base + DegToRad(float(rank % 5) * 72.0 - 144.0) * 0.5;
+			float spot[3];
+			spot[0] = target[0] + Cosine(ang) * 90.0;
+			spot[1] = target[1] + Sine(ang) * 90.0;
+			spot[2] = target[2];
+			Address a = NavBotNavMesh.GetNearestNavArea(spot, 80.0, false, true);
+			if (a != Address_Null)
+				NavBotNavArea.GetClosestPointOnArea(a, spot, moveGoal);
+		}
+	}
 	routeType = NAVBOT_FASTEST_ROUTE;
 	Unstick_WantMove(client, me, moveGoal);
 	return Plugin_Changed;

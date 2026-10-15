@@ -2038,6 +2038,21 @@ after trying crouch-and-melee); melee, crouched, only without a gun. Waiting unt
   post over one of its home's doors or windows (in sight, 150-600 units away: not hugging it, +200)
   with another survivor within 700 units for cover (+120), plus a little randomness.
 
+### 11.22 Zombies: breaking barricades together, swarming
+
+- **Keep hitting while it gives.** A zombie smashing something used to stop after 4 s (and give
+  up on it if it took no damage). Now, while the obstacle keeps losing health, the 4 s start
+  again, up to 30 s on the same thing: a board that's breaking gets broken.
+- **Call the horde to a barricade.** A zombie smashing a survivors' board (barricade model)
+  registers it for 15 s. Any zombie within 700 units whose survivor is inside that building
+  (within 600 units of the board, under a roof) comes to help: it goes to its own side of the
+  board (a little apart from the others) and smashes the same board. Several zombies on one board
+  break it far sooner than one zombie each on several. Debug: "calls the horde to barricade N".
+- **Surround, don't queue.** Two or more zombies after the same survivor they can see, 150-700
+  units away: each heads for its own point about 90 units from the survivor, spread over the side
+  they're coming from (72 degrees apart), instead of all following the same path in a line. From
+  150 units in, straight at them.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
