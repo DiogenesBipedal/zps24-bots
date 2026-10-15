@@ -2078,6 +2078,14 @@ Kept from the first idea: a jump step on a route now crouch-jumps for real (jump
 crouch held in the air, forward pressed, all in the usercmd), and a raised route point only
 counts as reached once the bot is really up on it (within 12 units).
 
+**Heavy furniture across a door (cinema's storage closet).** One zombie's shove that doesn't budge a
+piece of furniture used to mark it "fixed" for the whole horde: treat it as a wall, go round. Now,
+if it can't be broken either, the zombie calls the horde to shove it (`CallShovers`, 20 s). Zombies
+within 700 units whose survivor is indoors within 800 units of it come and shove it too
+(`JoinShove`). With 3 or more on it at once, it's unlocked if it was motion-locked (as enough force
+would) and each push is stronger the more there are (x1.5 per extra zombie). Only after two full
+group attempts fail is it written off as fixed.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

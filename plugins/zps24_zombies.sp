@@ -109,6 +109,11 @@ int g_drySize[COMP_MAX_ID];
 // Hordes: against survivors dug in together, one zombie at a time just gets shot. Gather at a
 // staging point out of their sight, then rush together.
 ConVar g_waves;
+#define HEAVY_MAX 6
+int   g_heavy[HEAVY_MAX] = { INVALID_ENT_REFERENCE, ... };
+float g_heavyUntil[HEAVY_MAX];
+int   g_heavyTries[HEAVY_MAX];
+float g_shovePower[MAXPLAYERS + 1] = { 1.0, ... };
 float g_smashStarted[MAXPLAYERS + 1];  // when we started on the current obstacle
 // Survivor barricades under attack: zombies nearby whose survivor is inside come and help.
 #define ASSAULT_MAX 8
@@ -924,6 +929,80 @@ Action Timer_PlankKnock(Handle timer, DataPack pack)
 	return Plugin_Stop;
 }
 
+// Heavy furniture the horde shoves together (one zombie couldn't budge it).
+int HeavyIndex(int prop)
+{
+	int ref = EntIndexToEntRef(prop);
+	for (int k = 0; k < HEAVY_MAX; k++)
+		if (g_heavy[k] == ref && GetGameTime() < g_heavyUntil[k])
+			return k;
+	return -1;
+}
+
+int Shovers(int prop)
+{
+	int ref = EntIndexToEntRef(prop), n = 0;
+	float c[3], eye[3];
+	CenterOf(prop, c);
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (g_shove[i] != ref || !IsClientInGame(i) || !IsPlayerAlive(i))
+			continue;
+		GetClientEyePosition(i, eye);
+		if (GetVectorDistance(eye, c) < 130.0)
+			n++;
+	}
+	return n;
+}
+
+// Returns false once it's had its chances (two group attempts): then it's fixed, go around.
+bool CallShovers(int client, int prop)
+{
+	int k = HeavyIndex(prop);
+	if (k == -1)
+	{
+		for (k = 0; k < HEAVY_MAX; k++)
+			if (EntRefToEntIndex(g_heavy[k]) == INVALID_ENT_REFERENCE || GetGameTime() >= g_heavyUntil[k])
+				break;
+		if (k == HEAVY_MAX)
+			return false;
+		g_heavy[k] = EntIndexToEntRef(prop);
+		g_heavyTries[k] = 0;
+	}
+	if (Shovers(prop) >= 3 && ++g_heavyTries[k] >= 2)
+		return false;                 // a full crew couldn't move it either
+	g_heavyUntil[k] = GetGameTime() + 20.0;
+	Debug("%N calls the horde to shove furniture %d", client, prop);
+	return true;
+}
+
+// Help shove heavy furniture within 700 units if our survivor is indoors within 800 of it.
+void JoinShove(int client, const float me[3])
+{
+	if (EntRefToEntIndex(g_shove[client]) != INVALID_ENT_REFERENCE || !IsLiveSurvivor(g_target[client]))
+		return;
+	float t[3];
+	GetClientAbsOrigin(g_target[client], t);
+	if (!Learned_Indoors(t))
+		return;
+	for (int k = 0; k < HEAVY_MAX; k++)
+	{
+		int prop = EntRefToEntIndex(g_heavy[k]);
+		if (prop == INVALID_ENT_REFERENCE || GetGameTime() >= g_heavyUntil[k])
+			continue;
+		float c[3];
+		CenterOf(prop, c);
+		if (GetVectorDistance(me, c) < 700.0 && GetVectorDistance(c, t) < 800.0)
+		{
+			g_shove[client] = EntIndexToEntRef(prop);
+			g_shoveUntil[client] = GetGameTime() + 6.0;
+			GetEntPropVector(prop, Prop_Data, "m_vecAbsOrigin", g_shoveFrom[client]);
+			Debug("%N joins the shove on %d", client, prop);
+			return;
+		}
+	}
+}
+
 // After one pane breaks: another intact pane stacked in the same window column (cabin's garage
 // doors: 14-unit panes between slats), to clear the opening further.
 int NextPane(int broken, const float at[3])
@@ -1255,6 +1334,7 @@ int UpdateBreach(int client, NavBot bot, const float me[3], int target, float mo
 				DataPack pack;
 				CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
 				pack.WriteCell(EntIndexToEntRef(blocker));
+				pack.WriteFloat(1.0);
 				pack.WriteFloat(dir[0]);
 				pack.WriteFloat(dir[1]);
 			}
@@ -1560,6 +1640,7 @@ int UpdateUnbar(int client, NavBot bot, const float me[3], float moveGoal[3])
 		DataPack pack;
 		CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
 		pack.WriteCell(EntIndexToEntRef(bar));
+		pack.WriteFloat(1.0);
 		pack.WriteFloat(dir[0]);
 		pack.WriteFloat(dir[1]);
 	}
@@ -2121,6 +2202,7 @@ bool UpdatePlace(int client, NavBot bot, float moveGoal[3], bool &walking)
 		DataPack pack;
 		CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
 		pack.WriteCell(EntIndexToEntRef(prop));
+		pack.WriteFloat(1.0);
 		pack.WriteFloat(dir[0]);
 		pack.WriteFloat(dir[1]);
 	}
@@ -2146,8 +2228,9 @@ Action Timer_ShoveImpulse(Handle timer, DataPack pack)
 	if (prop == INVALID_ENT_REFERENCE)
 		return Plugin_Stop;
 	float vel[3];
-	vel[0] = pack.ReadFloat() * 260.0;
-	vel[1] = pack.ReadFloat() * 260.0;
+	float power = pack.ReadFloat();
+	vel[0] = pack.ReadFloat() * 260.0 * power;
+	vel[1] = pack.ReadFloat() * 260.0 * power;
 	vel[2] = 40.0;
 	TeleportEntity(prop, NULL_VECTOR, NULL_VECTOR, vel);
 	return Plugin_Stop;
@@ -2177,6 +2260,11 @@ bool UpdateShove(int client, NavBot bot)
 				g_smashUntil[client] = GetGameTime() + 4.0;
 				g_smashHealth[client] = EntHealth(prop);
 			}
+			else if (CallShovers(client, prop))
+			{
+				// Too heavy for one (cinema's storage closet in a doorway): the horde shoves it
+				// together; written off only after group attempts failed.
+			}
 			else
 			{
 				if (g_fixedCount < sizeof(g_fixed))
@@ -2201,6 +2289,15 @@ bool UpdateShove(int client, NavBot bot)
 	{
 		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKSEC, 0.15);
 		g_nextShove[client] = GetGameTime() + 0.8;
+		// Heavy furniture with several of us on it: together we move it (unlock it if it's
+		// motion-locked, as enough force would), each push the stronger the more we are.
+		int crew = Shovers(prop);
+		if (crew >= 3 && HeavyIndex(prop) != -1)
+		{
+			AcceptEntityInput(prop, "EnableMotion");
+			AcceptEntityInput(prop, "Wake");
+		}
+		g_shovePower[client] = 1.0 + 0.5 * float(crew - 1);
 		float dir[3];
 		SubtractVectors(c, eye, dir);
 		dir[2] = 0.0;
@@ -2208,6 +2305,7 @@ bool UpdateShove(int client, NavBot bot)
 		DataPack pack;
 		CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
 		pack.WriteCell(EntIndexToEntRef(prop));
+		pack.WriteFloat(g_shovePower[client]);
 		pack.WriteFloat(dir[0]);
 		pack.WriteFloat(dir[1]);
 	}
@@ -2276,6 +2374,11 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		return Plugin_Continue;
 	}
 
+	{
+		float meS[3];
+		GetClientAbsOrigin(client, meS);
+		JoinShove(client, meS);
+	}
 	if (UpdateShove(client, bot))
 		return Plugin_Continue;
 
