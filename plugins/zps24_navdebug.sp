@@ -10,6 +10,8 @@
 //                                    (then sm_nav_save to keep the fixed mesh)
 //   sm_navbuttondoors [apply]        connections running through a closed door that only a button
 //                                    opens (the generator ignores doors): list or remove them
+//   sm_navlink id1 id2               connect two nav areas both ways (a narrow doorway the generator
+//                                    missed: cinema's corridor to the projection room landing)
 //   sm_navwater [apply]              connections into water areas (from anywhere): list them, or
 //                                    remove them, so paths never lead into or across a lake; the
 //                                    ways out of the water stay
@@ -34,6 +36,7 @@ public void OnPluginStart()
 	RegServerCmd("sm_navreach", Cmd_NavReach, "sm_navreach x y z x1 y1 z1 x2 y2 z2: which areas in the box are reachable from the area at x y z");
 	RegServerCmd("sm_navfixdrops", Cmd_NavFixDrops, "sm_navfixdrops [apply]: find (and remove) drop-down connections blocked by railings");
 	RegServerCmd("sm_navbuttondoors", Cmd_NavButtonDoors, "sm_navbuttondoors [apply]: find (and remove) connections running through doors only a button opens");
+	RegServerCmd("sm_navlink", Cmd_NavLink, "sm_navlink id1 id2: connect two nav areas both ways (a doorway the generator missed); sm_nav_save to keep");
 	RegServerCmd("sm_contents", Cmd_Contents, "sm_contents x y z: brush contents at a point");
 	RegServerCmd("sm_navwater", Cmd_NavWater, "sm_navwater [apply]: find (and remove) connections from dry ground into water");
 	RegServerCmd("sm_navseed", Cmd_NavSeed, "sm_navseed x y z: add a walkable seed for (incremental) nav generation");
@@ -421,5 +424,16 @@ Action Cmd_NavButtonDoors(int args)
 		for (int i = 0; i < found; i++)
 			NavBotNavArea.DisconnectFromAdjacent(fromA[i], toB[i]);
 	PrintToServer("[navbuttondoors] %d connections%s", found, apply ? " removed (sm_nav_save to keep)" : " (sm_navbuttondoors apply to remove)");
+	return Plugin_Handled;
+}
+
+Action Cmd_NavLink(int args)
+{
+	int a = RoundToFloor(ArgF(1)), b = RoundToFloor(ArgF(2));
+	Address A = NavBotNavMesh.GetNavAreaByID(a), B = NavBotNavMesh.GetNavAreaByID(b);
+	if (A == Address_Null || B == Address_Null) { PrintToServer("[navlink] no such area"); return Plugin_Handled; }
+	bool ab = NavBotNavArea.IsConnectedToAny(A, B) || NavBotNavArea.ConnectToAdjacent(A, B);
+	bool ba = NavBotNavArea.IsConnectedToAny(B, A) || NavBotNavArea.ConnectToAdjacent(B, A);
+	PrintToServer("[navlink] #%d -> #%d %s, #%d -> #%d %s", a, b, ab ? "linked" : "failed", b, a, ba ? "linked" : "failed");
 	return Plugin_Handled;
 }

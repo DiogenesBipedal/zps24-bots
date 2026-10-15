@@ -3255,7 +3255,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 {
 	if (client < 1 || client > MaxClients || !IsFakeClient(client))
 		return Plugin_Continue;
-	Action r = Plugin_Continue;
+	Action r = Stairs_RunCmd(client, buttons) ? Plugin_Changed : Plugin_Continue;
 	// Hammering: no switching weapons (NavBot's own weapon choice put the hammer away right after
 	// the click, which cancels the board).
 	if (GetGameTime() < g_hammerUntil[client] + 1.0 && weapon != 0)

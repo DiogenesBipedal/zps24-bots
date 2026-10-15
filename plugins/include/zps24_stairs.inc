@@ -25,6 +25,10 @@ int   g_st_routeCount;
 int   g_st_pointCount[STAIRS_MAX_ROUTES];
 float g_st_points[STAIRS_MAX_ROUTES][STAIRS_MAX_POINTS][3];
 int   g_st_lower[STAIRS_MAX_ROUTES];          // floor the route starts on (points[0]); -1 = learned
+float g_st_bestZ[MAXPLAYERS + 1];            // highest a bot got on a jump step (tuning)
+float g_st_jumpFrom[MAXPLAYERS + 1][3];
+bool  g_st_peakDucked[MAXPLAYERS + 1];
+float g_st_crouchJumpUntil[MAXPLAYERS + 1];   // crouch-jumping onto a ledge: buttons set in Stairs_RunCmd
 int   g_st_handMade;                          // routes before this index are hand-made
 int   g_st_ladderEnd;                         // [g_st_handMade, g_st_ladderEnd): ladders; after: learned
 bool  g_st_ladder[STAIRS_MAX_ROUTES];
@@ -101,6 +105,9 @@ void Stairs_OnMapStart()
 	}
 	g_st_handMade = g_st_routeCount;
 	Stairs_AddLadders();
+	// (zps_cinema's projection room: a crouch-jump through the projection window was tried and
+	// dropped. Zombies' crouch-jumps peak about 24 units up, the ledge is 44. The real way in is the
+	// z 112 corridor, which was missing from the nav mesh: seeded and generated, see the manual.)
 	g_st_ladderEnd = g_st_routeCount;
 	Learned_Load();
 	Stairs_AddLearned();
@@ -306,7 +313,9 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 			g_st_cooldown[client] = GetGameTime() + 3.0;
 			return false;
 		}
-		if (d < 16.0 && FloatAbs(me[2] - wp[2]) < 40.0)
+		// Reached: close, at its height; a point higher up only once we're really up on it (a step
+		// at the foot of cinema's projection window sat within 40 of the sill and skipped it).
+		if (d < 16.0 && FloatAbs(me[2] - wp[2]) < 40.0 && me[2] > wp[2] - 12.0)
 		{
 			int next = g_st_point[client] + g_st_step[client];
 			if (next < 0 || next >= g_st_pointCount[r])
@@ -339,10 +348,26 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 		NavBotPlayerControllerInterface.AimAtPos(ctrl, look, LOOK_MOVEMENT, 0.3, "Taking the stairs");
 		// Next point higher than a step (onto a car, a crate, a roof edge): jump for it, crouched,
 		// the way players climb.
-		if (!g_st_ladder[r] && wp[2] - me[2] > 18.0 && d < 90.0 && (GetEntityFlags(client) & FL_ONGROUND))
+		// A real crouch-jump: jump on the ground, pull the legs up (crouch) once in the air, keep
+		// pushing forward all the way.
+		if (!g_st_ladder[r] && wp[2] - me[2] > 18.0 && d < 90.0)
 		{
-			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_JUMP, 0.1);
-			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_CROUCH, 0.6);
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_FORWARDS, 0.2);
+			g_st_crouchJumpUntil[client] = GetGameTime() + 0.3;   // Stairs_RunCmd does the buttons
+			if (GetEntityFlags(client) & FL_ONGROUND)
+			{
+				if (g_st_bestZ[client] > me[2] + 4.0)
+					Stairs_Log("%N jump step: took off at %.0f %.0f %.0f, peaked at z %.0f %s(aiming for %.0f %.0f %.0f)", client,
+						g_st_jumpFrom[client][0], g_st_jumpFrom[client][1], g_st_jumpFrom[client][2], g_st_bestZ[client],
+						g_st_peakDucked[client] ? "crouched " : "standing ", wp[0], wp[1], wp[2]);
+				g_st_bestZ[client] = me[2];
+				g_st_jumpFrom[client] = me;
+			}
+			else if (me[2] > g_st_bestZ[client])
+			{
+				g_st_bestZ[client] = me[2];
+				g_st_peakDucked[client] = (GetEntityFlags(client) & FL_DUCKING) != 0;
+			}
 		}
 		NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), wp, 100);
 		result = Plugin_Continue;                    // keep the behavior, no pathfinding
@@ -401,5 +426,23 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 	moveGoal = start;
 	routeType = NAVBOT_FASTEST_ROUTE;
 	result = Plugin_Changed;
+	return true;
+}
+
+// Call from OnPlayerRunCmd. A crouch-jump needs jump on the ground, then duck held in the air (legs
+// up: about 18 units more). Pressed through NavBot the duck didn't happen mid-air and bots peaked
+// 18-23 units up, short of a 44-unit ledge; set straight in the usercmd, it does.
+stock bool Stairs_RunCmd(int client, int &buttons)
+{
+	if (client < 1 || client > MaxClients || GetGameTime() >= g_st_crouchJumpUntil[client])
+		return false;
+	if (GetEntityFlags(client) & FL_ONGROUND)
+	{
+		buttons |= IN_JUMP;
+		buttons &= ~IN_DUCK;
+	}
+	else
+		buttons |= IN_DUCK;
+	buttons |= IN_FORWARD;
 	return true;
 }

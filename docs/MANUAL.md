@@ -2053,6 +2053,31 @@ after trying crouch-and-melee); melee, crouched, only without a gun. Waiting unt
   they're coming from (72 degrees apart), instead of all following the same path in a line. From
   150 units in, straight at them.
 
+### 11.23 Cinema: the projection room was an island
+
+"Zombots can't reach me in the cinema room." The projection room (z 144) and the landing in front of
+it (z 112) connected only to each other: from the rest of the mesh, 0 of their areas were
+reachable (`sm_navreach`). So zombies had no path at all.
+
+1. **Wrong first idea: the projection window.** A survivor can crouch-jump from the floor below
+   (z 64) onto the window's ledge (z 105-108, measured with `sm_floormap`), then on into the room
+   (z 152). Logging every bot jump (take-off, peak, crouched or not) showed zombies peak about 24
+   units up even with the crouch set straight in their usercmd (`Stairs_RunCmd`; through NavBot
+   the mid-air crouch never happened). The ledge is 44 up: not for zombies. Dropped.
+2. **The real way, from the teacher's recording as a zombie:** stairs at (-2699, -714, z -7) up to
+   (-2677, -544, z 106), then a long z 112 corridor north to the landing. The mesh had nothing
+   along that corridor: the generator never reached it. On the test server, with bots off (adding
+   seeds while bots use the mesh crashes `CNavMesh::Update`), seeds went in along the corridor
+   (`sm_navseed`) in one command line with `sm_nav_generate_incremental`, which added 28 areas.
+   The corridor still didn't join the landing: a narrow doorway at x -2400, y 525-550 the
+   generator left open. `sm_navlink 28 278` (new in zps24_navdebug: connect two areas both ways
+   by ID) closed it; `sm_navreach` from the stairs then found all 10 projection-room areas. Saved
+   with `sm_nav_save`.
+
+Kept from the first idea: a jump step on a route now crouch-jumps for real (jump on the ground,
+crouch held in the air, forward pressed, all in the usercmd), and a raised route point only
+counts as reached once the bot is really up on it (within 12 units).
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

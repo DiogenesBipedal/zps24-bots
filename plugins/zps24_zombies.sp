@@ -2968,3 +2968,11 @@ Action Cmd_Status(int args)
 	}
 	return Plugin_Handled;
 }
+
+// Crouch-jumps onto ledges (cinema's projection window): the buttons go straight into the usercmd.
+public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
+{
+	if (client > 0 && client <= MaxClients && IsFakeClient(client) && Stairs_RunCmd(client, buttons))
+		return Plugin_Changed;
+	return Plugin_Continue;
+}
