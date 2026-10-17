@@ -9,6 +9,7 @@
 #include <sourcemod>
 #pragma dynamic 1048576   // 4 MB heap: Doors_LoadButtons reads the map's entity lump
 #include <sdktools>
+#include <sdkhooks>
 #include <navbot>
 #include "include/zps24_unstick.inc"
 #include "include/zps24_stairs.inc"
@@ -119,6 +120,9 @@ float g_smashStarted[MAXPLAYERS + 1];  // when we started on the current obstacl
 // Survivor barricades under attack: zombies nearby whose survivor is inside come and help.
 #define ASSAULT_MAX 8
 int   g_assault[ASSAULT_MAX] = { INVALID_ENT_REFERENCE, ... };
+#define ASSAULT_CREW 4      // zombies on one board at once; more just hit each other
+#define CLAW_DAMAGE  30.0
+float g_nextAssist[MAXPLAYERS + 1];
 float g_assaultUntil[ASSAULT_MAX];
 int   g_relinked[64];                  // button-only doors already linked through once open
 int   g_relinkedCount;
@@ -810,6 +814,36 @@ void CallForHelp(int client, int obstacle)
 	Debug("%N calls the horde to barricade %d", client, obstacle);
 }
 
+// Zombies (other than us) smashing this board or crowding it.
+int AssaultCrew(int board, int client)
+{
+	int ref = EntIndexToEntRef(board), n = 0;
+	float bc[3], p[3];
+	CenterOf(board, bc);
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (i == client || !IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) != TEAM_ZOMBIES)
+			continue;
+		GetClientAbsOrigin(i, p);
+		if (g_smash[i] == ref || GetVectorDistance(p, bc) < 90.0)
+			n++;
+	}
+	return n;
+}
+
+bool TraceNotMe(int ent, int mask, any me)
+{
+	return ent != me;
+}
+
+// Is the swing at `at` stopped by another player before it gets there?
+bool SwingBlocked(int client, const float eye[3], const float at[3])
+{
+	TR_TraceRayFilter(eye, at, MASK_SHOT, RayType_EndPoint, TraceNotMe, client);
+	int hit = TR_GetEntityIndex();
+	return TR_DidHit() && hit >= 1 && hit <= MaxClients;
+}
+
 // Help break a barricade under attack within 700 units, if our survivor is inside that building
 // (within 600 of it, under a roof). Spread round it: each helper takes its own side.
 int JoinAssault(int client, const float me[3], float moveGoal[3])
@@ -832,8 +866,8 @@ int JoinAssault(int client, const float me[3], float moveGoal[3])
 		float d = GetVectorDistance(me, bc);
 		if (d < bestDist && GetVectorDistance(bc, t) < 600.0) { bestDist = d; board = b; }
 	}
-	if (board == -1)
-		return ENTRY_NONE;
+	if (board == -1 || (AssaultCrew(board, client) >= ASSAULT_CREW && EntRefToEntIndex(g_smash[client]) != board))
+		return ENTRY_NONE;              // full: find another way in
 	float bc[3], eye[3];
 	CenterOf(board, bc);
 	GetClientEyePosition(client, eye);
@@ -2305,7 +2339,8 @@ bool UpdateShove(int client, NavBot bot)
 		// Heavy furniture with several of us on it: together we move it (unlock it if it's
 		// motion-locked, as enough force would), each push the stronger the more we are.
 		int crew = Shovers(prop);
-		if (crew >= 3 && HeavyIndex(prop) != -1)
+		int hk = HeavyIndex(prop);
+		if (crew >= 2 && hk != -1)
 		{
 			AcceptEntityInput(prop, "EnableMotion");
 			AcceptEntityInput(prop, "Wake");
@@ -2315,6 +2350,14 @@ bool UpdateShove(int client, NavBot bot)
 		SubtractVectors(c, eye, dir);
 		dir[2] = 0.0;
 		NormalizeVector(dir, dir);
+		// Straight on didn't move it (wedged against a door frame, cabin's upstairs couch): each
+		// group attempt pushes at another angle, 60 degrees left, then right.
+		if (hk != -1 && g_heavyTries[hk] > 0)
+		{
+			float turn = DegToRad(g_heavyTries[hk] % 2 == 1 ? 60.0 : -60.0), x = dir[0], y = dir[1];
+			dir[0] = x * Cosine(turn) - y * Sine(turn);
+			dir[1] = x * Sine(turn) + y * Cosine(turn);
+		}
 		DataPack pack;
 		CreateDataTimer(0.25, Timer_ShoveImpulse, pack, TIMER_FLAG_NO_MAPCHANGE);
 		pack.WriteCell(EntIndexToEntRef(prop));
@@ -2444,6 +2487,14 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		}
 		if (g_smashStarted[client] == 0.0)
 			g_smashStarted[client] = GetGameTime();
+		// A crowd on a board: the claw's swing stops at the zombie in front instead of the board
+		// (main house: 12 on one board, 50 hp off it in minutes, "won't break"). A swing in reach
+		// that a zombie blocks lands on the board.
+		if (GetGameTime() >= g_nextAssist[client] && GetVectorDistance(eyeS, c) < 75.0 && SwingBlocked(client, eyeS, c))
+		{
+			g_nextAssist[client] = GetGameTime() + 0.8;
+			SDKHooks_TakeDamage(obstacle, client, client, CLAW_DAMAGE, DMG_CLUB);
+		}
 		CallForHelp(client, obstacle);      // a survivor barricade: the others pile in
 		return Plugin_Continue;
 	}

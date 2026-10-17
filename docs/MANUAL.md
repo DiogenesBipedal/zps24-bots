@@ -2106,6 +2106,25 @@ each zombie aimed at (a trace along its view every few seconds) showed three sep
    (`CLIMB_MAX`), measured from the lower side, both for picking entrances and for openings to
    break through.
 
+### 11.25 Main house: a crowd that couldn't break one board
+
+"Zombies are stopping at the front of the house" / "stuck in the main house, can't break the
+barricade." About 12 zombies stood packed against one survivor board in a doorway of the front
+room. A trace along each one's view hit the zombie in front of it, not the board: a claw swing
+stops at the first player it meets. The board lost about 50 hp in minutes, every zombie decided
+"won't break" in turn, wandered off and came back.
+
+- **Blocked swings land.** A zombie smashing an obstacle within 75 units whose line to it is
+  blocked by another player gives the obstacle a claw hit (30, at most every 0.8 s) through
+  `SDKHooks_TakeDamage`. The front row hit it for real, so the crowd behind no longer adds
+  nothing. Right after the change the board broke, then two more on the stairs, and zombies
+  reached the upstairs floor.
+- **Crew cap.** At most 4 zombies (`ASSAULT_CREW`) answer the call to one board; the rest look for
+  another way in.
+- **Wedged furniture.** A couch on the upstairs landing didn't move for 5 zombies pushing straight
+  at it. A group shove now unlocks the prop's motion with 2 on it (was 3). Each later group
+  attempt pushes 60 degrees to the left, then to the right, to get it off the door frame.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
