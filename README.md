@@ -4,13 +4,17 @@ Bots for **Zombie Panic! Source 2.4**, the classic version Steam still offers as
 beta. Run a small Linux server on your own PC, fill it with bots, and play survivors vs. zombies
 against them from your normal ZPS 2.4 game.
 
-- **Survivor bots** defend the house they spawn in: they head upstairs (upper floors, roofs,
-  balconies), shove furniture into the ground-floor doors with bare hands, keep back from windows,
-  and shoot zombies from a safe distance, falling back when one gets close. They never break
-  windows, doors or barricades.
+- **Survivor bots** defend the house they spawn in: they spread out and patrol it, head upstairs
+  (upper floors, roofs, balconies), close doors, shove furniture into doorways, heal with first
+  aid kits and regroup when hurt. They camp roof and balcony edges and shoot down instead of
+  falling off, and shoot zombies from a safe distance, falling back when one gets close.
 - **Bots learn from you:** while you play, they record your hold-out spots, the routes you take
-  between floors and the distances you fight at, and copy them.
-- **Zombie bots** hunt survivors down, follow them upstairs and smash through anything breakable.
+  between floors, where you push furniture, where you nail boards, how you get in as a zombie and
+  the distances you fight at, and copy them.
+- **Zombie bots** gather into hordes, pick off stragglers and swarm survivors. They smash windows
+  and survivors' boards together, climb through windows, knock planks off doors, open doors with E
+  and with door buttons, shove heavy furniture as a group, follow survivors upstairs and get out of
+  water onto the shore.
 - Bots on both teams, including the Carrier. Up to 24 players and bots.
 - An **admin menu** (M) to add or remove bots, set their skill, change maps and spawn items, and a
   **grappling hook** (V) for getting around.
@@ -19,13 +23,13 @@ against them from your normal ZPS 2.4 game.
 It's built on [NavBot](https://github.com/caxanga334/NavBot), with fixes that make modern
 Metamod:Source, SourceMod and NavBot run on the 2007-era ZPS 2.4 engine.
 
-> **Status: early (v0.1).** Bots play full rounds, but they barricade with furniture only (no
-> hammer yet) and some maps need tuning. See [Known issues](#known-issues).
+> **Status: v1.0.** Bots play full rounds on 33 maps with ready-made nav meshes. Some maps still
+> need tuning. See [Known issues](#known-issues).
 
 ## What you need
 
-- **A Linux PC to host the server.** Tested on x86-64 Linux with glibc 2.41. Windows hosting isn't
-  supported yet ([details](#windows)). Players can join from any OS.
+- **A Linux PC to host the server.** Tested on x86-64 Linux with glibc 2.41. For a Windows host,
+  see [Windows](#windows). Players can join from any OS.
 - **32-bit libraries** for the 2007 server and SteamCMD. On Debian/Ubuntu:
   `sudo dpkg --add-architecture i386 && sudo apt install lib32gcc-s1 lib32stdc++6 libc6-i386`.
   On other distros, install the equivalent 32-bit glibc and libstdc++ packages.
@@ -146,8 +150,10 @@ Every setting and command is in [docs/SETTINGS.md](docs/SETTINGS.md).
 
 ## Known issues
 
-- Survivor bots barricade with furniture only. The barricade hammer is off: the game's weight
-  limit stops armed bots from carrying it.
+- Builder bots (survivors with the hammer) often fail to get a board up. They nail boards only where
+  you've nailed one yourself on that map.
+- Zombies can still get stuck on some maps, mostly where a survivor barricade or furniture blocks
+  the only way in.
 - Bots occasionally post random text in chat.
 - The server sometimes crashes when it shuts down. It doesn't affect play.
 
@@ -155,8 +161,9 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what's planned.
 
 ## Windows
 
-Players on Windows can join a Linux-hosted server normally. Hosting on Windows isn't supported
-yet. Running the server inside WSL2 should work but hasn't been tested.
+Players on Windows can join a Linux-hosted server normally. To host on Windows, use the Windows
+package: [zps24-bots-windows](https://github.com/DiogenesBipedal/zps24-bots-windows) (download
+the zip from its Releases page, unzip, run `install.bat`). It's the same bots and AI.
 
 ## Uninstall
 
