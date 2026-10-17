@@ -2086,6 +2086,26 @@ within 700 units whose survivor is indoors within 800 units of it come and shove
 would) and each push is stronger the more there are (x1.5 per extra zombie). Only after two full
 group attempts fail is it written off as fixed.
 
+### 11.24 Cabin garage: zombies hitting walls
+
+"Bots are confused and hitting walls, not the barricades and door in the garage." Watching what
+each zombie aimed at (a trace along its view every few seconds) showed three separate faults:
+
+1. **A shove that never ended.** Two zombies in the narrow passage between the garage and the side
+   room kept shoving an oil drum that wouldn't move. The group shove from 11.23 only gave up once
+   3 or more zombies were on the prop, and only 2 fit there, so they tried forever. Now every call
+   counts (a full crew counts double); after 4 the call is written off and cancelled, so no new
+   zombie joins it. Props smaller than 48 units across never call the horde: go around them.
+2. **Swinging from too far.** Smashing aimed and swung but never moved. A zombie 57 units from a
+   survivor's board hit nothing, saw no damage, marked the board "won't break" and wandered off
+   into the walls. Now, while further than 50 units, it steps into reach first (up to 8 s before
+   the no-damage check counts).
+3. **A window too high to climb.** The garage's side window sill is 43 units above the passage
+   floor. Zombie crouch-jumps peak about 24 up (11.23), but windows were allowed up to 56, so a
+   zombie that broke the glass jumped at the wall below it again and again. The limit is now 34
+   (`CLIMB_MAX`), measured from the lower side, both for picking entrances and for openings to
+   break through.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

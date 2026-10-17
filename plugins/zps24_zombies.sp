@@ -83,6 +83,7 @@ float  g_deadEndUntil[MAXPLAYERS + 1][4];
 // bar against them, windows and boarded windows. Survivors must not path through these (they
 // don't break barricades), so they are not linked; zombies break through them deliberately.
 #define BR_MAX       96
+#define CLIMB_MAX    34.0   // highest sill a zombie gets over: crouch-jumps peak ~24 units up (cabin garage window, 43: no)
 #define BR_WINDOW    0      // glass: smash until broken
 #define BR_PLANK     1      // plank / board (func_physbox): knock it off
 #define BR_BARDOOR   2      // a door with a bar against it: knock the bar off, open the door
@@ -955,9 +956,16 @@ int Shovers(int prop)
 	return n;
 }
 
-// Returns false once it's had its chances (two group attempts): then it's fixed, go around.
+// Returns false once it's had its chances (two group attempts, or four calls when a full crew
+// can't get at it, as in cabin's narrow garage passage): then it's fixed, go around. Small props
+// (an oil drum) aren't worth a horde: go around them.
 bool CallShovers(int client, int prop)
 {
+	float mins[3], maxs[3];
+	GetEntPropVector(prop, Prop_Send, "m_vecMins", mins);
+	GetEntPropVector(prop, Prop_Send, "m_vecMaxs", maxs);
+	if (maxs[0] - mins[0] < 48.0 && maxs[1] - mins[1] < 48.0)
+		return false;
 	int k = HeavyIndex(prop);
 	if (k == -1)
 	{
@@ -969,8 +977,13 @@ bool CallShovers(int client, int prop)
 		g_heavy[k] = EntIndexToEntRef(prop);
 		g_heavyTries[k] = 0;
 	}
-	if (Shovers(prop) >= 3 && ++g_heavyTries[k] >= 2)
-		return false;                 // a full crew couldn't move it either
+	int crew = Shovers(prop);
+	g_heavyTries[k] += crew >= 3 ? 2 : 1;
+	if (g_heavyTries[k] >= 4)
+	{
+		g_heavyUntil[k] = 0.0;        // a full crew couldn't move it either: call the horde off
+		return false;
+	}
 	g_heavyUntil[k] = GetGameTime() + 20.0;
 	Debug("%N calls the horde to shove furniture %d", client, prop);
 	return true;
@@ -988,7 +1001,7 @@ void JoinShove(int client, const float me[3])
 	for (int k = 0; k < HEAVY_MAX; k++)
 	{
 		int prop = EntRefToEntIndex(g_heavy[k]);
-		if (prop == INVALID_ENT_REFERENCE || GetGameTime() >= g_heavyUntil[k])
+		if (prop == INVALID_ENT_REFERENCE || GetGameTime() >= g_heavyUntil[k] || !IsFurniture(prop) || IsIgnored(client, prop))
 			continue;
 		float c[3];
 		CenterOf(prop, c);
@@ -1151,7 +1164,7 @@ bool ChooseEntry(int client, const float target[3])
 				float inFloor[3];
 				NavBotNavArea.GetClosestPointOnArea(inArea, inside, inFloor);
 				float sill = WindowSill(ent);
-				if (FloatAbs(inFloor[2] - out[2]) > 24.0 || sill - out[2] > 56.0)
+				if (FloatAbs(inFloor[2] - out[2]) > 24.0 || sill - out[2] > CLIMB_MAX)
 					continue;
 				inside = inFloor;
 			}
@@ -2418,6 +2431,17 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		CenterOf(obstacle, c);
 		NavBotPlayerControllerInterface.AimAtPos(ctrl, c, LOOK_PRIORITY, 0.5, "Smashing barricade");
 		NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_ATTACKPRIM, 0.3);
+		// Swings from further off hit the wall or nothing (cabin's garage: 57 units from a
+		// board, no damage, "won't break"): step into reach, and give it the time it took.
+		float eyeS[3];
+		GetClientEyePosition(client, eyeS);
+		if (GetVectorDistance(eyeS, c) > 50.0)
+		{
+			NavBotMovementInterface.MoveTowards(bot.GetMovementInterface(), c, 100);
+			if (EntHealth(obstacle) >= g_smashHealth[client] && g_smashUntil[client] < GetGameTime() + 0.5
+				&& (g_smashStarted[client] == 0.0 || GetGameTime() < g_smashStarted[client] + 8.0))
+				g_smashUntil[client] = GetGameTime() + 0.5;
+		}
 		if (g_smashStarted[client] == 0.0)
 			g_smashStarted[client] = GetGameTime();
 		CallForHelp(client, obstacle);      // a survivor barricade: the others pile in
@@ -2850,9 +2874,9 @@ int LinkDoors(bool verbose)
 			if (TR_DidHit())
 				continue;
 			float bottom = origin[2] + mins[2];
-			float floorZ = pa[2] > pb[2] ? pa[2] : pb[2];
-			if (!isDoor && bottom - floorZ > 56.0)
-				continue;                    // too high to climb through
+			float floorZ = pa[2] < pb[2] ? pa[2] : pb[2];
+			if (!isDoor && bottom - floorZ > CLIMB_MAX)
+				continue;                    // too high to climb through (from the lower side)
 
 			int bar = isDoor ? DoorBar(ent) : -1;
 			if (isDoor && bar == -1)
