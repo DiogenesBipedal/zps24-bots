@@ -350,7 +350,7 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 		// the way players climb.
 		// A real crouch-jump: jump on the ground, pull the legs up (crouch) once in the air, keep
 		// pushing forward all the way.
-		if (!g_st_ladder[r] && wp[2] - me[2] > 18.0 && d < 90.0)
+		if (!g_st_ladder[r] && d < 90.0 && (wp[2] - me[2] > 18.0 || Stairs_LowOpening(me, wp)))
 		{
 			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_FORWARDS, 0.2);
 			g_st_crouchJumpUntil[client] = GetGameTime() + 0.3;   // Stairs_RunCmd does the buttons
@@ -427,6 +427,36 @@ bool Stairs_Update(int client, NavBot bot, const float me[3], const float target
 	routeType = NAVBOT_FASTEST_ROUTE;
 	result = Plugin_Changed;
 	return true;
+}
+
+bool Stairs_NotPlayers(int ent, int mask)
+{
+	return ent > MaxClients;
+}
+
+// The way to the next point goes through a window (cabin's main house: off the roof through the
+// upstairs window, the teacher's route as a zombie): standing we'd walk into the wall under it or
+// the frame above, crouched and jumping we get through. Then crouch-jump, the way the teacher does.
+bool Stairs_LowOpening(const float me[3], const float wp[3])
+{
+	float dir[3], to[3];
+	SubtractVectors(wp, me, dir);
+	dir[2] = 0.0;
+	if (GetVectorLength(dir) < 8.0)
+		return false;
+	NormalizeVector(dir, dir);
+	ScaleVector(dir, 48.0);
+	float from[3];
+	from = me;
+	from[2] += 2.0;
+	AddVectors(from, dir, to);
+	TR_TraceHullFilter(from, to, view_as<float>({-16.0, -16.0, 0.0}), view_as<float>({16.0, 16.0, 72.0}), MASK_PLAYERSOLID, Stairs_NotPlayers);
+	if (!TR_DidHit())
+		return false;                        // walk on through
+	from[2] = me[2] + 26.0;                  // a crouched body at the top of a jump
+	to[2] = from[2];
+	TR_TraceHullFilter(from, to, view_as<float>({-16.0, -16.0, 0.0}), view_as<float>({16.0, 16.0, 36.0}), MASK_PLAYERSOLID, Stairs_NotPlayers);
+	return !TR_DidHit();
 }
 
 // Call from OnPlayerRunCmd. A crouch-jump needs jump on the ground, then duck held in the air (legs

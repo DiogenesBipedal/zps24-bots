@@ -2100,11 +2100,12 @@ each zombie aimed at (a trace along its view every few seconds) showed three sep
    survivor's board hit nothing, saw no damage, marked the board "won't break" and wandered off
    into the walls. Now, while further than 50 units, it steps into reach first (up to 8 s before
    the no-damage check counts).
-3. **A window too high to climb.** The garage's side window sill is 43 units above the passage
-   floor. Zombie crouch-jumps peak about 24 up (11.23), but windows were allowed up to 56, so a
-   zombie that broke the glass jumped at the wall below it again and again. The limit is now 34
-   (`CLIMB_MAX`), measured from the lower side, both for picking entrances and for openings to
-   break through.
+3. **A window too high to climb?** The garage's side window sill is 43 units above the passage
+   floor, and a zombie jumped at the wall under it again and again. A limit of 34 units on window
+   sills was tried and reverted the same day: the main house's front window is 41 up and zombies
+   do climb it (it's how they got in), and with the limit they milled about outside it. The limit
+   is 56 again (`CLIMB_MAX`). A window that really can't be climbed is given up on after 3 tries
+   in a minute.
 
 ### 11.25 Main house: a crowd that couldn't break one board
 
@@ -2141,6 +2142,26 @@ bots' side by side:
 Now a builder clicks once and doesn't click while `m_bAttachBarricade` is 1. Only when the attach
 is over without a board used up does it click again, 0.5 s later. The small/large board guess
 (R) was a red herring.
+
+**Still not seen working:** right after this change on cabin the builders still reported "7
+boards left (had 7)". Next step: log one builder's click and attach tick by tick while it hammers.
+
+### 11.27 The kitchen island, and windows on routes
+
+- **Survivors stuck in a corner** of cabin's main house: they were in the kitchen, and from there
+  only 15 nav areas could be reached. Its two doors (`kitchendoor`, `beddoor`) are physics doors
+  (a door-shaped `func_physbox` on a hinge). Those were only recorded as openings for zombies to
+  break, and got a nav link only after a zombie cleared one. With no link, every path to a patrol
+  or defend spot failed and the bots piled up against the wall. `LinkDoors` now links a physics
+  door with no planks on it at map start, like a plain door: walking into it swings it open.
+  Planked ones stay with the break-in code. After the change, 421 areas were reachable from the
+  kitchen and the survivors spread back through the house.
+- **Jump, then crouch, through the upstairs window** (the teacher's route as a zombie: from the
+  roof at z 209 through a 62-unit-tall window into the second floor at z 152). A route only
+  crouch-jumped when the next point was more than 18 units higher. Going through a window to a
+  lower floor it never jumped, so the zombie walked into the wall under the sill. Now, when a
+  standing body is blocked on the way to the next point but a crouched body at the top of a jump
+  (26 up) gets through, the bot crouch-jumps there too (`Stairs_LowOpening`).
 
 ## 12. The Windows port
 

@@ -84,7 +84,7 @@ float  g_deadEndUntil[MAXPLAYERS + 1][4];
 // bar against them, windows and boarded windows. Survivors must not path through these (they
 // don't break barricades), so they are not linked; zombies break through them deliberately.
 #define BR_MAX       96
-#define CLIMB_MAX    34.0   // highest sill a zombie gets over: crouch-jumps peak ~24 units up (cabin garage window, 43: no)
+#define CLIMB_MAX    56.0   // highest sill a zombie climbs through (cabin main house front window: 41, they do)
 #define BR_WINDOW    0      // glass: smash until broken
 #define BR_PLANK     1      // plank / board (func_physbox): knock it off
 #define BR_BARDOOR   2      // a door with a bar against it: knock the bar off, open the door
@@ -2925,12 +2925,16 @@ int LinkDoors(bool verbose)
 			if (TR_DidHit())
 				continue;
 			float bottom = origin[2] + mins[2];
-			float floorZ = pa[2] < pb[2] ? pa[2] : pb[2];
+			float floorZ = pa[2] > pb[2] ? pa[2] : pb[2];
 			if (!isDoor && bottom - floorZ > CLIMB_MAX)
-				continue;                    // too high to climb through (from the lower side)
+				continue;                    // too high to climb through
 
 			int bar = isDoor ? DoorBar(ent) : -1;
-			if (isDoor && bar == -1)
+			// A physics door with no planks on it (cabin's kitchen and bedroom doors) swings open
+			// when walked into: link it like a plain door. Without this the kitchen was an island
+			// and survivor bots in it piled into a corner, no path to anywhere.
+			bool openPhys = isPlank && IsPhysDoor(ent) && DoorBar(ent) == -1;
+			if ((isDoor && bar == -1) || openPhys)
 			{
 				// A plain door: everyone can walk through. Link it.
 				bool ab = NavBotNavArea.IsConnectedToAny(areaA, areaB), ba = NavBotNavArea.IsConnectedToAny(areaB, areaA);
