@@ -2125,6 +2125,23 @@ stops at the first player it meets. The board lost about 50 hp in minutes, every
   at it. A group shove now unlocks the prop's motion with 2 on it (was 3). Each later group
   attempt pushes 60 degrees to the left, then to the right, to get it off the door frame.
 
+### 11.26 Builders: the second click took the board back
+
+"Barricading doesn't complete by bots." Builders found a spot where the board fits, hammered, and
+their board count never went down. Logging the hammer's state every tick, the teacher's and the
+bots' side by side:
+
+- **Teacher:** one click. `m_bAttachBarricade` goes 1 at once, the attach animation runs about
+  0.7 s, then a board is used up. No second click. It works with the small or the large board, and
+  even while `m_bCanAttachBoard` reads 0.
+- **Bots:** the click starts the attach the same way (attach 1), but the build loop clicked again
+  every 0.6 s ("one click per nail"). The second click came just before the 0.7 s were up, and the
+  attach dropped to 0 with no board used. Every time.
+
+Now a builder clicks once and doesn't click while `m_bAttachBarricade` is 1. Only when the attach
+is over without a board used up does it click again, 0.5 s later. The small/large board guess
+(R) was a red herring.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
