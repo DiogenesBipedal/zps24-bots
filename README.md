@@ -23,8 +23,9 @@ against them from your normal ZPS 2.4 game.
 It's built on [NavBot](https://github.com/caxanga334/NavBot), with fixes that make modern
 Metamod:Source, SourceMod and NavBot run on the 2007-era ZPS 2.4 engine.
 
-> **Status: v1.0.** Bots play full rounds on 33 maps with ready-made nav meshes. Some maps still
-> need tuning. See [Known issues](#known-issues).
+> **Status: v1.0.1.** Bots play full rounds on 29 maps with ready-made nav meshes: the 27 that
+> come with the dedicated server, plus cabin and church, which the installer copies from your
+> ZPS 2.4 game. Some maps still need tuning. See [Known issues](#known-issues).
 
 ## What you need
 
@@ -150,6 +151,9 @@ Every setting and command is in [docs/SETTINGS.md](docs/SETTINGS.md).
 
 ## Known issues
 
+- The four lake maps in the rotation file are ZPS 3.x maps converted for 2.4 and aren't included.
+  If you have ZPS 3.x, `tools/bsp_to_24.py` converts them; the server and every player need the
+  same converted file. The installer leaves maps you don't have out of the rotation.
 - Builder bots (survivors with the hammer) often fail to get a board up. They nail boards only where
   you've nailed one yourself on that map.
 - Zombies can still get stuck on some maps, mostly where a survivor barricade or furniture blocks

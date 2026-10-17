@@ -94,7 +94,26 @@ cp -n "$REPO"/data/navbot/zps/*.smnav "$SMD/data/navbot/zps/" 2>/dev/null || tru
 mkdir -p "$SERVER/zps/cfg/sourcemod"
 cp -n "$REPO/configs/plugin.navbot_quota.cfg" "$SERVER/zps/cfg/sourcemod/" 2>/dev/null || true
 cp -n "$REPO/configs/server.cfg" "$SERVER/zps/cfg/" 2>/dev/null || true
-cp -n "$REPO/configs/mapcycle_bots.txt" "$SERVER/zps/" 2>/dev/null || true
+# Cabin and church don't come with the dedicated server but with the ZPS 2.4 game: copy them from
+# a Steam library on this PC (native or Flatpak Steam, any library folder).
+for m in zpo_cabin_outbreak_b8_com zpo_church_siege_final_h; do
+	[ -f "$SERVER/zps/maps/$m.bsp" ] && continue
+	found=""
+	for st in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
+		for lib in "$st" $(sed -n 's/.*"path"[[:space:]]*"\([^"]*\)".*/\1/p' "$st/steamapps/libraryfolders.vdf" 2>/dev/null); do
+			f="$lib/steamapps/common/Zombie Panic Source/zps/maps/$m.bsp"
+			[ -f "$f" ] && { found="$f"; break 2; }
+		done
+	done
+	if [ -n "$found" ]; then cp "$found" "$SERVER/zps/maps/"; echo "  copied $m from your ZPS 2.4 game"
+	else echo "  $m not found: install ZPS 2.4 in Steam (Properties > Betas > legacy2.4) and run this again, or copy $m.bsp into $SERVER/zps/maps"; fi
+done
+# The rotation: only maps this server has (the lake maps are converted 3.x maps, not included).
+if [ ! -f "$SERVER/zps/mapcycle_bots.txt" ]; then
+	while read -r m; do
+		[ -f "$SERVER/zps/maps/$m.bsp" ] && echo "$m"
+	done < "$REPO/configs/mapcycle_bots.txt" > "$SERVER/zps/mapcycle_bots.txt"
+fi
 # Make the local machine admin (LAN Steam IDs are all STEAM_ID_LAN, so match by IP).
 LANIP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 grep -q "\"!$LANIP\"" "$SMD/configs/admins_simple.ini" || printf '"!%s"\t"99:z"\n' "$LANIP" >> "$SMD/configs/admins_simple.ini"
