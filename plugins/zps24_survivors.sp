@@ -1834,8 +1834,12 @@ bool DoBuild(int client, NavBot bot, float moveGoal[3])
 			g_clickUntil[client] = 0.0;
 			return false;
 		}
-		// Separate clicks, one per nail: a held button only counts once.
-		if (GetGameTime() >= g_nextNail[client])
+		// One click per board. The attach runs about 0.7 s on its own after it (the teacher clicks
+		// once); a click during it cancels the board, which a click every 0.6 s always did. Only
+		// once it's over without a board used up, click again.
+		if (GetEntProp(tool, Prop_Send, "m_bAttachBarricade"))
+			g_nextNail[client] = GetGameTime() + 0.5;
+		else if (GetGameTime() >= g_nextNail[client])
 		{
 			// Straight into the bot's usercmd (OnPlayerRunCmd): the hammer reads the real buttons.
 			g_clickUntil[client] = GetGameTime() + 0.15;
