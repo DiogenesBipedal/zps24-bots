@@ -2178,6 +2178,13 @@ which takes no damage. A zombie that did no damage itself in its 4 s window gave
 Right after the change the panel broke and zombies went in and worked the garage door button. The
 door's loose top half (a 1500 hp physics prop) still swings into the doorway at times.
 
+**Then: stuck at the big garage doors.** Once a zombie opens a big garage door from inside, its
+nav link stays (taking links out kicks every bot), so after the survivors shut it the pathfinder
+walks zombies up to it again and they stand there. Now a zombie outside within 70 units of a shut
+button-only door (`ButtonDoorNear`) is sent to find another way in (`ForceEntry`: the side door).
+One of the teacher's zombie entrances had both ends outside, in front of a garage door. Learned
+entrances whose inside point isn't under a roof are skipped.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

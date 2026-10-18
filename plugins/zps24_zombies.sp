@@ -942,6 +942,35 @@ bool ButtonOnlyDoor(int ent)
 	return (flags & (256 | 1024)) == 0 && HasEntProp(ent, Prop_Data, "m_toggle_state") && GetEntProp(ent, Prop_Data, "m_toggle_state") == 1;
 }
 
+// A closed button-only door within reach (cabin's big garage doors). Its nav link stays in the
+// mesh once it has been open (taking links out kicks every bot), so the pathfinder walks zombies
+// up to it shut and they stand there.
+int ButtonDoorNear(const float me[3])
+{
+	static const char classes[][] = { "func_door", "func_door_rotating" };
+	for (int c = 0; c < sizeof(classes); c++)
+	{
+		int d = -1;
+		while ((d = FindEntityByClassname(d, classes[c])) != -1)
+		{
+			if (!ButtonOnlyDoor(d))
+				continue;
+			float o[3], mins[3], maxs[3], p[3];
+			GetEntPropVector(d, Prop_Data, "m_vecAbsOrigin", o);
+			GetEntPropVector(d, Prop_Send, "m_vecMins", mins);
+			GetEntPropVector(d, Prop_Send, "m_vecMaxs", maxs);
+			for (int i = 0; i < 3; i++)
+			{
+				float lo = o[i] + mins[i], hi = o[i] + maxs[i];
+				p[i] = me[i] < lo ? lo : (me[i] > hi ? hi : me[i]);
+			}
+			if (FloatAbs(p[2] - me[2]) < 40.0 && SquareRoot((p[0] - me[0]) * (p[0] - me[0]) + (p[1] - me[1]) * (p[1] - me[1])) < 70.0)
+				return d;
+		}
+	}
+	return -1;
+}
+
 // Glass set into such a door (its panes are parented to it).
 bool InButtonOnlyDoor(int ent)
 {
@@ -1127,8 +1156,8 @@ bool ChooseEntry(int client, const float target[3])
 	for (int e = 0; e < g_ln_entryCount; e++)
 	{
 		float d = GetVectorDistance(g_ln_entryIn[e], target);
-		if (d > 700.0)
-			continue;
+		if (d > 700.0 || !Learned_Indoors(g_ln_entryIn[e]))
+			continue;               // its "in" is outdoors too (one in front of cabin's garage): no way in
 		int uses = g_ln_entryUses[e] > 5 ? 5 : g_ln_entryUses[e];
 		float cost = d - 200.0 - 60.0 * float(uses) + 300.0 * float(EntryLoad(client, g_ln_entryOut[e]));
 		if (cost < bestCost)
@@ -2598,6 +2627,13 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 	{
 		g_btnCheck[client] = GetGameTime() + 2.0;
 		StartOpenButton(client, me);   // inside next to closed button doors: open them for the horde
+	}
+	// Outside, up against a shut button-only door: it won't open from here. Another way in.
+	if (!Learned_Indoors(me))
+	{
+		int bd = ButtonDoorNear(me);
+		if (bd != -1)
+			ForceEntry(client, bd);
 	}
 	int entry = UpdateButton(client, bot, me, moveGoal);
 	if (entry == ENTRY_NONE)
