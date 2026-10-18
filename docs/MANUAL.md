@@ -2163,6 +2163,21 @@ boards left (had 7)". Next step: log one builder's click and attach tick by tick
   standing body is blocked on the way to the next point but a crouched body at the top of a jump
   (26 up) gets through, the bot crouch-jumps there too (`Stairs_LowOpening`).
 
+### 11.28 Garage side door: giving up at 302 hp
+
+"Garage zombies are still getting stuck." The side door's wooden panel was down to 302 of its 2000
+hp: zombies were breaking it, but each one walked off ("won't break, detouring") just before it
+went. The panel and the door it belongs to fill the same space, so many swings land on the door,
+which takes no damage. A zombie that did no damage itself in its 4 s window gave up.
+
+- An obstacle that has lost health already (below `m_iMaxHealth`) is slow, not unbreakable: keep
+  smashing it, up to 45 s from the first swing.
+- A swing in reach that hits the door in front of its own panel lands on the panel (same assist as
+  a swing blocked by another zombie, 11.25).
+
+Right after the change the panel broke and zombies went in and worked the garage door button. The
+door's loose top half (a 1500 hp physics prop) still swings into the doorway at times.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

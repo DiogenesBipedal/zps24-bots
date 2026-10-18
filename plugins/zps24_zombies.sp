@@ -837,11 +837,22 @@ bool TraceNotMe(int ent, int mask, any me)
 }
 
 // Is the swing at `at` stopped by another player before it gets there?
-bool SwingBlocked(int client, const float eye[3], const float at[3])
+// Or by the door in front of its own breakable panel (cabin's garage side door: the door and its
+// 2000 hp panel fill the same space, and many swings land on the door, which takes no damage).
+bool SwingBlocked(int client, const float eye[3], const float at[3], int obstacle)
 {
 	TR_TraceRayFilter(eye, at, MASK_SHOT, RayType_EndPoint, TraceNotMe, client);
 	int hit = TR_GetEntityIndex();
-	return TR_DidHit() && hit >= 1 && hit <= MaxClients;
+	if (!TR_DidHit() || hit <= 0 || hit == obstacle)
+		return false;
+	return hit <= MaxClients || (Doors_IsHinged(hit) && DoorPart(hit) == obstacle);
+}
+
+// A breakable that has lost health already: slow to break, not unbreakable.
+bool Damaged(int ent)
+{
+	return HasEntProp(ent, Prop_Data, "m_iMaxHealth") && EntHealth(ent) > 0
+		&& EntHealth(ent) < GetEntProp(ent, Prop_Data, "m_iMaxHealth");
 }
 
 // Help break a barricade under attack within 700 units, if our survivor is inside that building
@@ -2454,6 +2465,14 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		g_smashHealth[client] = EntHealth(obstacle);
 		g_smashUntil[client] = GetGameTime() + 4.0;
 	}
+	if (obstacle != INVALID_ENT_REFERENCE && GetGameTime() >= g_smashUntil[client] && Damaged(obstacle)
+		&& g_smashStarted[client] > 0.0 && GetGameTime() < g_smashStarted[client] + 45.0)
+	{
+		// No damage from us these 4 s, but it's well on its way (the garage side door's panel: 302
+		// of 2000 hp left when zombies kept walking off it): keep at it.
+		g_smashHealth[client] = EntHealth(obstacle);
+		g_smashUntil[client] = GetGameTime() + 4.0;
+	}
 	if (obstacle != INVALID_ENT_REFERENCE && GetGameTime() >= g_smashUntil[client])
 	{
 		// Time's up: if it took no damage, it can't be broken this way. Forget it and go around.
@@ -2490,7 +2509,7 @@ Action OnScriptedUpdate(NavBot bot, float moveGoal[3], NavBotRouteType& routeTyp
 		// A crowd on a board: the claw's swing stops at the zombie in front instead of the board
 		// (main house: 12 on one board, 50 hp off it in minutes, "won't break"). A swing in reach
 		// that a zombie blocks lands on the board.
-		if (GetGameTime() >= g_nextAssist[client] && GetVectorDistance(eyeS, c) < 75.0 && SwingBlocked(client, eyeS, c))
+		if (GetGameTime() >= g_nextAssist[client] && GetVectorDistance(eyeS, c) < 75.0 && SwingBlocked(client, eyeS, c, obstacle))
 		{
 			g_nextAssist[client] = GetGameTime() + 0.8;
 			SDKHooks_TakeDamage(obstacle, client, client, CLAW_DAMAGE, DMG_CLUB);
