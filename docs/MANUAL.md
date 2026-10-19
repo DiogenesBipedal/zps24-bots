@@ -2185,6 +2185,29 @@ button-only door (`ButtonDoorNear`) is sent to find another way in (`ForceEntry`
 One of the teacher's zombie entrances had both ends outside, in front of a garage door. Learned
 entrances whose inside point isn't under a roof are skipped.
 
+### 11.29 Cabin: the horde stuck on the balcony
+
+"Zombie bots are stuck in balcony on cabin." Nine zombies stood pressed against the balcony
+railing at x = -450, 144 units up, with the survivors inside the house. There were two causes:
+
+- **The mesh.** The balcony area (#138) had drop-down connections over its railing to the ground,
+  the same trap cinema had (11.15), and cabin had never been run through `sm_navfixdrops`. It found
+  28 blocked drops on cabin: the balcony, the outside stairs' landing and upstairs windows in the
+  house. They were removed on the test server (port 27035) and saved. `sm_navreach` from the upper
+  floors reaches the same areas as before, so nothing got cut off. The main server loads the mesh
+  at its next map load.
+- **The gathering point.** When survivors dig in, the horde gathers 800-1200 units away from them
+  (11.16). The spot was searched for at the zombies' own average height. With a few zombies already
+  on the balcony, the nearest area at that height was the balcony itself, so the horde kept
+  gathering up there. The search height is now the lower of the zombies' and the survivors'
+  heights, and a spot more than 64 units above that height is skipped.
+
+Lesson: run `sm_navfixdrops` on every map whose mesh you ship, not only on maps where you have
+already seen bots stuck.
+
+Also fixed: `sm_zps24ai_status all` threw an exception when a broken window's entity index had been
+reused by a ragdoll (no `m_vecMins`).
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

@@ -314,22 +314,24 @@ void UpdateWave()
 			NormalizeVector(dir, dir);
 			ScaleVector(dir, 800.0);
 			// Out in the open (not inside the survivors' building, as happened in cabin's garage):
-			// further out until it's under the sky.
+			// further out until it's under the sky. On the ground, too: searched at the zombies' own
+			// height, the horde once gathered on cabin's balcony and kept re-picking it from up there.
 			float want[3], unit[3];
+			float floorZ = zc[2] < sc[2] ? zc[2] : sc[2];
 			unit = dir;
 			NormalizeVector(unit, unit);
 			Address a = Address_Null;
 			for (float far = 800.0; far <= 1200.0; far += 200.0)
 			{
 				for (int i = 0; i < 2; i++) want[i] = sc[i] + unit[i] * far;
-				want[2] = zc[2];
+				want[2] = floorZ;
 				a = NavBotNavMesh.GetNearestNavArea(want, 400.0, false, true);
 				if (a != Address_Null)
 				{
 					float ac[3];
 					NavBotNavArea.GetCenter(a, ac);
 					ac[2] += 30.0;
-					if (!Learned_Indoors(ac))
+					if (ac[2] - floorZ < 94.0 && !Learned_Indoors(ac))
 						break;
 				}
 				a = Address_Null;

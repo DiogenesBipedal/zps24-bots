@@ -3162,7 +3162,7 @@ Action Cmd_Status(int args)
 			int e = g_openingEnt[o];
 			char cls[64] = "?";
 			float mins[3], maxs[3];
-			if (IsValidEntity(e))
+			if (IsValidEntity(e) && HasEntProp(e, Prop_Send, "m_vecMins"))
 			{
 				GetEntityClassname(e, cls, sizeof(cls));
 				GetEntPropVector(e, Prop_Send, "m_vecMins", mins);
