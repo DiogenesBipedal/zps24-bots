@@ -2208,6 +2208,61 @@ already seen bots stuck.
 Also fixed: `sm_zps24ai_status all` threw an exception when a broken window's entity index had been
 reused by a ragdoll (no `m_vecMins`).
 
+### 11.30 The upstairs roof window: shortcuts, furniture steps, crouching
+
+"Get zombies to enter it, jump and crouch in, use sofa or table to prop up to the window." The
+window is the glass at x 369-429 on cabin's main house, sill at z 213, opening 56-62 tall. The
+upstairs floor is at z 152 (61 below the sill: no jump makes it), the roof outside at z 209. The
+teacher's routes already covered it: route 5 (roof -> window -> upstairs, used 23 times) and routes
+4/10/13 (upstairs -> couch -> sill -> roof). Why the bots never used them, and the fixes:
+
+- **The 60-unit gate.** Learned routes were only looked at when the target was 60+ units higher or
+  lower, and only once the bot was stuck. Roof vs upstairs is 57. Now `Stairs_ShortcutFor` takes a
+  learned route whenever the nav mesh has no way to the target or its way is much longer (every
+  2 s per bot, it builds a nav path to compare). Trap: with no path, NavBot's `BuildPathSimple`
+  still returns true with "start, goal" (a 58-unit hop through the wall). A path whose last hop
+  climbs 40+ doesn't count.
+- **Too steep backwards.** Route 5 walked backwards climbs 62 straight up. Route directions with
+  one climb over 58 are skipped (`Stairs_TooSteep`).
+- **Furniture steps.** A route point floating 30-70 above flat floor (the teacher stood on the
+  couch) with nothing under it now: the bot fetches the nearest couch/table/desk from any floor,
+  carries it (cheat: whatever it weighs, no collisions while carried, or it falls down the
+  stairwell next to the window, which is where the couches went when they were pushed) and sets
+  it down under the point. Furniture on a route step is left alone by zombie shoves and survivor
+  barricading (`Stairs_IsStepProp`). A sloped nav area under the point (stairs) is no furniture
+  step: route 0's mid-air points over the stairs had bots pushing a desk onto the steps.
+- **Low ceiling.** On the couch the head is 13 units from the ceiling: a standing jump peaked at
+  204, short of the 214 sill. Under a low ceiling the crouch-jump now crouches first and jumps
+  once crouched (`Stairs_LowCeiling`).
+- **Crouching through.** In the air any bot tucks its legs when only a crouched body fits ahead;
+  on the ground survivors (and any bot on a route) crouch-walk under a gap. This also got zombies
+  back out of the side room behind the ground-floor window (opening 62 tall), where they bobbed
+  under the sill and stayed stuck downstairs.
+- **Glass first.** Intact glass on a route is shot or smashed before going through.
+
+Seen working: a zombie fetched couch 215 from the foot of the stairs, set it under the window and
+got onto the sill. Debug tools added: `sm_lookat` (where a player aims; `!here` logs it too),
+`sm_wallscan x y z yaw` (an ASCII grid of a wall: finds openings), `sm_entsnear x y z r`,
+`sm_navpath`, `sm_zps24ai_spot client spot` (-1 lists the spots).
+
+### 11.31 Night cabin
+
+Lighting is baked into the map, and all 51 of cabin's lights share light style 0 with the sun, so
+the server can't darken the outside at runtime. `tools/bsp_relight.py` dims `light_environment`
+(sun and sky ambient) to moonlight and sets a night sky; VRAD then bakes again, and the house and
+garage lights stay as they were. The Source SDK 2013 VRAD (Steam app 243750) runs under Proton's
+Wine. It wants `bin/filesystem_steam.dll` (copy `FileSystem_Stdio.dll` there), `lights.rad` next to
+it, and static props v10: `bsp_relight.py --to-v10` before the bake, `--to-v6` after.
+
+```
+bsp_relight.py cabin.bsp night.bsp && bsp_relight.py --to-v10 night.bsp night.bsp
+wine vrad.exe -both -game "Z:<2.4 zps dir>" "Z:night.bsp"
+bsp_relight.py --to-v6 night.bsp night.bsp
+```
+
+The server and every player need the same file. Swap it only between maps: the game reads packed
+textures out of the .bsp while the map runs.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,
