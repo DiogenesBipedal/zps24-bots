@@ -2152,7 +2152,7 @@ bool IsFurniture(int ent)
 	for (int i = 0; i < g_fixedCount; i++)
 		if (g_fixed[i] == ref)
 			return false;                // fixed in place: treat like a wall
-	return !IsZombieStep(ent);
+	return !IsZombieStep(ent) && !Stairs_IsStepProp(ent);   // a route's step (couch under a window) stays
 }
 
 // Furniture sitting where the main player put it as a zombie (a car to climb a roof from):
@@ -3211,7 +3211,13 @@ Action Cmd_Status(int args)
 // Crouch-jumps onto ledges (cinema's projection window): the buttons go straight into the usercmd.
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
-	if (client > 0 && client <= MaxClients && IsFakeClient(client) && Stairs_RunCmd(client, buttons))
-		return Plugin_Changed;
-	return Plugin_Continue;
+	if (client < 1 || client > MaxClients || !IsFakeClient(client))
+		return Plugin_Continue;
+	Action r = Stairs_RunCmd(client, buttons) ? Plugin_Changed : Plugin_Continue;
+	if (Stairs_CrouchUnder(client, vel, angles, false))
+	{
+		buttons |= IN_DUCK;
+		r = Plugin_Changed;
+	}
+	return r;
 }

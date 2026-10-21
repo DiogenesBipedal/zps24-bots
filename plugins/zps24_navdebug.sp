@@ -12,6 +12,8 @@
 //                                    opens (the generator ignores doors): list or remove them
 //   sm_navlink id1 id2               connect two nav areas both ways (a narrow doorway the generator
 //                                    missed: cinema's corridor to the projection room landing)
+//   sm_lookat                        where each human player is aiming: hit point, surface normal,
+//                                    entity (and a few traces around it to size a window)
 //   sm_navwater [apply]              connections into water areas (from anywhere): list them, or
 //                                    remove them, so paths never lead into or across a lake; the
 //                                    ways out of the water stay
@@ -39,6 +41,10 @@ public void OnPluginStart()
 	RegServerCmd("sm_navlink", Cmd_NavLink, "sm_navlink id1 id2: connect two nav areas both ways (a doorway the generator missed); sm_nav_save to keep");
 	RegServerCmd("sm_contents", Cmd_Contents, "sm_contents x y z: brush contents at a point");
 	RegServerCmd("sm_navwater", Cmd_NavWater, "sm_navwater [apply]: find (and remove) connections from dry ground into water");
+	RegServerCmd("sm_lookat", Cmd_LookAt, "sm_lookat: where each human player is aiming");
+	RegServerCmd("sm_wallscan", Cmd_WallScan, "sm_wallscan x y z yaw: grid of trace distances ahead (find a window's opening)");
+	RegServerCmd("sm_entsnear", Cmd_EntsNear, "sm_entsnear x y z radius: entities near a point (class, name, origin, bounds, model)");
+	RegServerCmd("sm_navpath", Cmd_NavPath, "sm_navpath x y z x y z: the nav mesh's path between two points");
 	RegServerCmd("sm_navseed", Cmd_NavSeed, "sm_navseed x y z: add a walkable seed for (incremental) nav generation");
 }
 
@@ -435,5 +441,123 @@ Action Cmd_NavLink(int args)
 	bool ab = NavBotNavArea.IsConnectedToAny(A, B) || NavBotNavArea.ConnectToAdjacent(A, B);
 	bool ba = NavBotNavArea.IsConnectedToAny(B, A) || NavBotNavArea.ConnectToAdjacent(B, A);
 	PrintToServer("[navlink] #%d -> #%d %s, #%d -> #%d %s", a, b, ab ? "linked" : "failed", b, a, ba ? "linked" : "failed");
+	return Plugin_Handled;
+}
+
+public bool TraceNotPlayers(int entity, int mask, any data)
+{
+	return entity > MaxClients || entity == 0;
+}
+
+Action Cmd_LookAt(int args)
+{
+	for (int c = 1; c <= MaxClients; c++)
+	{
+		if (!IsClientInGame(c) || IsFakeClient(c) || !IsPlayerAlive(c))
+			continue;
+		float eye[3], ang[3], pos[3], end[3], n[3];
+		GetClientEyePosition(c, eye);
+		GetClientEyeAngles(c, ang);
+		GetClientAbsOrigin(c, pos);
+		// MASK_SHOT stops on glass; MASK_PLAYERSOLID shows what blocks walking
+		Handle tr = TR_TraceRayFilterEx(eye, ang, MASK_SHOT, RayType_Infinite, TraceNotPlayers);
+		TR_GetEndPosition(end, tr);
+		TR_GetPlaneNormal(tr, n);
+		int ent = TR_GetEntityIndex(tr);
+		delete tr;
+		char cls[64] = "world", name[64] = "";
+		if (ent > 0 && IsValidEntity(ent))
+		{
+			GetEntityClassname(ent, cls, sizeof(cls));
+			GetEntPropString(ent, Prop_Data, "m_iName", name, sizeof(name));
+		}
+		PrintToServer("[lookat] %N at %.0f %.0f %.0f (eye z %.0f) yaw %.0f pitch %.0f -> hit %.0f %.0f %.0f normal %.2f %.2f %.2f dist %.0f, ent %d %s '%s'",
+			c, pos[0], pos[1], pos[2], eye[2], ang[1], ang[0], end[0], end[1], end[2], n[0], n[1], n[2], GetVectorDistance(eye, end), ent, cls, name);
+	}
+	return Plugin_Handled;
+}
+
+// Rows from z+160 down to z-40 (every 8), columns 64 units either side: how far a player-solid
+// trace goes ahead before hitting something (. = more than 48 past the start, i.e. open).
+Action Cmd_WallScan(int args)
+{
+	float o[3], yaw = ArgF(4);
+	for (int i = 0; i < 3; i++) o[i] = ArgF(i + 1);
+	float fwd[3], side[3];
+	fwd[0] = Cosine(DegToRad(yaw)); fwd[1] = Sine(DegToRad(yaw)); fwd[2] = 0.0;
+	side[0] = -fwd[1]; side[1] = fwd[0]; side[2] = 0.0;
+	for (float dz = 160.0; dz >= -40.0; dz -= 8.0)
+	{
+		char row[256];
+		Format(row, sizeof(row), "z %4.0f ", o[2] + dz);
+		for (float ds = -64.0; ds <= 64.0; ds += 8.0)
+		{
+			float a[3], b[3];
+			for (int i = 0; i < 3; i++) a[i] = o[i] + side[i] * ds;
+			a[2] += dz;
+			for (int i = 0; i < 3; i++) b[i] = a[i] + fwd[i] * 96.0;
+			Handle tr = TR_TraceRayFilterEx(a, b, MASK_PLAYERSOLID, RayType_EndPoint, TraceNotPlayers);
+			float f = TR_GetFraction(tr);
+			int ent = TR_GetEntityIndex(tr);
+			delete tr;
+			char c[4];
+			if (f >= 1.0) c = ".";
+			else if (ent > 0) c = "E";
+			else Format(c, sizeof(c), "%d", RoundToFloor(f * 96.0 / 10.0));
+			StrCat(row, sizeof(row), c);
+		}
+		PrintToServer("[wallscan] %s", row);
+	}
+	return Plugin_Handled;
+}
+
+Action Cmd_EntsNear(int args)
+{
+	float p[3], r = ArgF(4);
+	for (int i = 0; i < 3; i++) p[i] = ArgF(i + 1);
+	for (int e = MaxClients + 1; e < GetMaxEntities(); e++)
+	{
+		if (!IsValidEdict(e) || !HasEntProp(e, Prop_Send, "m_vecOrigin"))
+			continue;
+		float o[3], lo[3], hi[3];
+		GetEntPropVector(e, Prop_Data, "m_vecAbsOrigin", o);
+		if (HasEntProp(e, Prop_Send, "m_vecMins"))
+		{
+			GetEntPropVector(e, Prop_Send, "m_vecMins", lo);
+			GetEntPropVector(e, Prop_Send, "m_vecMaxs", hi);
+		}
+		float c[3];
+		for (int i = 0; i < 3; i++) c[i] = o[i] + (lo[i] + hi[i]) * 0.5;
+		if (GetVectorDistance(c, p) > r)
+			continue;
+		char cls[64], name[64], model[128];
+		GetEdictClassname(e, cls, sizeof(cls));
+		GetEntPropString(e, Prop_Data, "m_iName", name, sizeof(name));
+		GetEntPropString(e, Prop_Data, "m_ModelName", model, sizeof(model));
+		float mass = 0.0;
+		PrintToServer("[entsnear] %d %s '%s' at %.0f %.0f %.0f size (%.0f %.0f %.0f)-(%.0f %.0f %.0f) %s", e, cls, name, o[0], o[1], o[2], lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], model);
+		mass = mass;
+	}
+	return Plugin_Handled;
+}
+
+Action Cmd_NavPath(int args)
+{
+	float a[3], b[3];
+	for (int i = 0; i < 3; i++) { a[i] = ArgF(i + 1); b[i] = ArgF(i + 4); }
+	if (!BuildPathSimple(a, b))
+	{
+		PrintToServer("[navpath] no path");
+		return Plugin_Handled;
+	}
+	int n = GetPathSegmentCount();
+	char line[1024] = "";
+	for (int i = 0; i < n; i++)
+	{
+		float p[3];
+		GetPathSegment(i, p);
+		Format(line, sizeof(line), "%s (%.0f %.0f %.0f)", line, p[0], p[1], p[2]);
+	}
+	PrintToServer("[navpath] %d segments:%s", n, line);
 	return Plugin_Handled;
 }

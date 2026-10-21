@@ -148,6 +148,7 @@ Action Cmd_Here(int client, int args)
 	GetClientAbsOrigin(client, pos);
 	GetClientEyeAngles(client, ang);
 	LogMessage("HERE %N at %.0f %.0f %.0f facing yaw %.0f", client, pos[0], pos[1], pos[2], ang[1]);
+	ServerCommand("sm_lookat");   // zps24_navdebug: where they aim, into the server log
 	PrintToChat(client, "[ZPS] Logged your position %.0f %.0f %.0f", pos[0], pos[1], pos[2]);
 	return Plugin_Handled;
 }

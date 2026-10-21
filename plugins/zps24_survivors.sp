@@ -222,6 +222,7 @@ public void OnPluginStart()
 	HookEventEx("player_spawn", Event_PlayerSpawn, EventHookMode_Post);
 	RegServerCmd("sm_zps24ai_status", Cmd_Status, "Show the hold-out and barricade progress");
 	RegServerCmd("sm_zps24ai_bots", Cmd_Bots, "What each survivor bot is doing");
+	RegServerCmd("sm_zps24ai_spot", Cmd_Spot, "sm_zps24ai_spot client spot: send a survivor bot to one of its home's defend spots for a minute (testing); spot -1 lists them");
 	RegServerCmd("sm_zps24ai_doors", Cmd_Doors, "List every door with its size and the headroom on both sides");
 	ResetRound();
 }
@@ -1144,7 +1145,7 @@ int FindFurniture(int o, float maxDist)
 		int ent = -1;
 		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
 		{
-			if (GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity") != -1 || IsBadProp(ent) || IsBarricadeProp(ent))
+			if (GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity") != -1 || IsBadProp(ent) || IsBarricadeProp(ent) || Stairs_IsStepProp(ent))
 				continue;
 			float mins[3], maxs[3], pos[3];
 			GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);
@@ -3192,6 +3193,34 @@ Action Cmd_Status(int args)
 }
 
 
+Action Cmd_Spot(int args)
+{
+	char a[16];
+	GetCmdArg(1, a, sizeof(a));
+	int client = StringToInt(a);
+	GetCmdArg(2, a, sizeof(a));
+	int spot = StringToInt(a);
+	if (client >= 1 && client <= MaxClients && IsClientInGame(client) && g_home[client] >= 0 && spot == -1)
+	{
+		int h = g_home[client];
+		for (int i = 0; i < g_defendCount[h]; i++)
+			PrintToServer("  spot %d: %.0f %.0f %.0f", i, g_defendPos[h][i][0], g_defendPos[h][i][1], g_defendPos[h][i][2]);
+		return Plugin_Handled;
+	}
+	if (client < 1 || client > MaxClients || !IsClientInGame(client) || !IsFakeClient(client) || g_home[client] < 0
+		|| spot < 0 || spot >= g_defendCount[g_home[client]])
+	{
+		PrintToServer("usage: sm_zps24ai_spot client spot (a survivor bot with a home; spot < its home's defend spot count)");
+		return Plugin_Handled;
+	}
+	g_defendIdx[client] = spot;
+	g_defendSwitch[client] = GetGameTime() + 60.0;
+	float p[3];
+	p = g_defendPos[g_home[client]][spot];
+	PrintToServer("[zps24ai] %N -> spot %d (%.0f %.0f %.0f) for 60 s", client, spot, p[0], p[1], p[2]);
+	return Plugin_Handled;
+}
+
 Action Cmd_Bots(int args)
 {
 	for (int i = 1; i <= MaxClients; i++)
@@ -3272,5 +3301,11 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		buttons |= IN_ATTACK;
 		r = Plugin_Changed;
 	}
+	if (Stairs_CrouchUnder(client, vel, angles, true))
+	{
+		buttons |= IN_DUCK;
+		r = Plugin_Changed;
+	}
 	return r;
 }
+
