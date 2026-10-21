@@ -64,9 +64,12 @@ def static_props_to_v6(b):
             d, ver, changed = bytes(out), 6, True
             print('static props: %d records v10 (%d bytes) -> v6' % (count, size))
         entries.append((gid, flags, ver, d))
-    if not changed:
-        return
-    # Game lump offsets are absolute: write the whole block again at the end of the file.
+    if changed:
+        write_game_lumps(b, entries)
+
+
+def write_game_lumps(b, entries):
+    """Game lump offsets are absolute: write the whole block again at the end of the file."""
     head = 4 + 16 * len(entries)
     while len(b) % 4:
         b += b'\0'
