@@ -198,13 +198,36 @@ public void OnMapStart()
 		g_goalTime[i] = 0.0;
 		g_blockedSince[i] = 0.0;
 		for (int k = 0; k < 4; k++)
+		{
 			g_deadEndUntil[i][k] = 0.0;
+			g_ignoreUntil[i][k] = 0.0;
+		}
+		// Bots are added again on every map, often into the same slots, and game time restarts
+		// at 0: any "until" left from the last map would hold for minutes on this one.
+		g_stuckSince[i] = 0.0;
+		g_smashUntil[i] = 0.0;
+		g_shoveUntil[i] = 0.0;
+		g_entryClearAt[i] = 0.0;
+		g_brLastAt[i] = -1000.0;
+		g_brUntil[i] = 0.0;
+		g_unbarUntil[i] = 0.0;
+		g_forceEntryUntil[i] = 0.0;
+		g_btnUntil[i] = 0.0;
+		g_btnCheck[i] = 0.0;
+		g_swimUntil[i] = 0.0;
+		g_swimBanUntil[i] = 0.0;
 		Unstick_Reset(i);
 	}
 	Stairs_OnMapStart();
 	ResetPlacements();
 	Doors_LoadButtons();
 	g_doorsLinked = false;
+	// Game time starts at 0 again on every map: timestamps from the last map would hold the horde
+	// back until the clock caught up with them.
+	g_waveState = WAVE_CHARGE;
+	g_waveSince = 0.0;
+	g_waveCheck = 0.0;
+	g_stageValid = false;
 	CreateTimer(0.5, Timer_Think, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 }
 

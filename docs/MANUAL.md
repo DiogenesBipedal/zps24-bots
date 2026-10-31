@@ -2263,6 +2263,43 @@ bsp_relight.py --to-v6 night.bsp night.bsp
 The server and every player need the same file. Swap it only between maps: the game reads packed
 textures out of the .bsp while the map runs.
 
+### 11.32 Learning from a frozen player
+
+The teacher's game froze and crashed several times in one evening. Each time, their player stayed
+in the server, standing still, until the connection timed out, and `zps24_learn` saw exactly what
+it looks for in a hold spot: the teacher, alive, not moving for 10 seconds or more. If the zombies
+then killed the frozen body, that "hold" was saved too (at a quarter of its time). The bots
+learned to stand where a crashed player had stood.
+
+`IsTeacher` now also asks SourceMod's `IsClientTimingOut`, which turns true a few seconds after a
+client stops sending packets. A client that's timing out isn't a teacher, and `Timer_Watch`
+drops anything it was in the middle of recording for a non-teacher (`ResetClient`) without saving
+it. So a freeze teaches nothing: no hold spot, no route, no boards.
+
+### 11.33 Timers that outlived their map
+
+"Bots are being stupid again": zombies walking into walls and not attacking properly, survivors
+backing off from nothing. It showed up on an evening of map changes (cabin, church, cinema,
+badbayou, cabin), and `sm_zps24zombies_status` gave it away: the horde had been in its phase
+for **−99 seconds**.
+
+`GetGameTime()` counts from 0 again on every map. The plugins keep many "until" timestamps:
+*react to that hit until T*, *hold bare hands for the shove until T*, *ignore this prop until T*,
+*a button-only door stopped me, find another way in until T*, *no swimming until T*. A timer set
+near the end of a 10-minute map holds a value around 600. On the next map, `now < 600` stays
+true for the first ten minutes. Bots are added again on every map, usually into the same client
+slots, so a fresh bot inherited the old bot's orders. A survivor kept backing off from a hit
+taken on another map, or kept its bare hands up instead of its gun. A zombie headed for another
+way in through what was now a wall.
+
+The fix resets every per-bot timestamp when a map starts: in `OnMapStart` for the zombies, and
+in `ResetRound` (called from `OnMapStart` and on round restarts) for the survivors. The horde's
+`g_waveSince` and `g_waveCheck` reset there too. References to entities didn't need this: an
+entity reference from the last map never matches one on the new map.
+
+**Rule for new code:** any global `float` that stores a `GetGameTime()` value must be reset in
+`OnMapStart`.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

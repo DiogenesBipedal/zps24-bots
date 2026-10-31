@@ -356,6 +356,10 @@ bool IsTeacher(int client)
 {
 	if (!IsClientInGame(client) || IsFakeClient(client))
 		return false;
+	// A frozen or crashed game stops sending input but the player stays in the server until
+	// the timeout: standing still like that is not a hold spot (or anything else) to learn.
+	if (IsClientTimingOut(client))
+		return false;
 	char want[64];
 	g_teacher.GetString(want, sizeof(want));
 	if (want[0] != '\0')

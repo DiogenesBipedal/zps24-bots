@@ -405,7 +405,19 @@ void ResetRound()
 		g_home[i] = -1;
 		Unstick_Reset(i);
 		g_scripted[i] = false;
+		// Bots are added again on every map, often into the same slots, and game time restarts
+		// at 0: an "until" left from the last map (backing off after a hit, bare hands for a
+		// shove) would hold for minutes on this one.
 		g_restockUntil[i] = 0.0;
+		g_clickUntil[i] = 0.0;
+		g_aidCheck[i] = 0.0;
+		g_closeUntil[i] = 0.0;
+		g_breakUntil[i] = 0.0;
+		g_hammerUntil[i] = 0.0;
+		g_armPauseUntil[i] = 0.0;
+		g_hurtUntil[i] = 0.0;
+		g_handsUntil[i] = 0.0;
+		g_shoveUntil[i] = 0.0;
 	}
 }
 
