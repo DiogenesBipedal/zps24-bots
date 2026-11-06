@@ -46,6 +46,7 @@ public void OnPluginStart()
 	RegServerCmd("sm_entsnear", Cmd_EntsNear, "sm_entsnear x y z radius: entities near a point (class, name, origin, bounds, model)");
 	RegServerCmd("sm_navpath", Cmd_NavPath, "sm_navpath x y z x y z: the nav mesh's path between two points");
 	RegServerCmd("sm_navseed", Cmd_NavSeed, "sm_navseed x y z: add a walkable seed for (incremental) nav generation");
+	RegServerCmd("sm_navbridge", Cmd_NavBridge, "sm_navbridge x y z [apply] [maxdist]: link areas unreachable from x y z to the reachable mesh where a player can walk across (steep stairs, gaps the generator skipped)");
 }
 
 float ArgF(int i)
@@ -559,5 +560,211 @@ Action Cmd_NavPath(int args)
 		Format(line, sizeof(line), "%s (%.0f %.0f %.0f)", line, p[0], p[1], p[2]);
 	}
 	PrintToServer("[navpath] %d segments:%s", n, line);
+	return Plugin_Handled;
+}
+
+// ---------------------------------------------------------------------------------------------
+// sm_navbridge: the generator skips steep stairs (rural panic's houses: whole upper floors were
+// islands). For each area that can't be reached from the start, find the nearest reachable area a
+// player can really walk to (steps of at most 18 units, a clear standing hull, no gap) and link it.
+
+#define NB_MAXID 32768
+bool g_nbReach[NB_MAXID];
+
+// What blocks a walk: the world and solid brush entities (walls, windows, panels), but not doors
+// (bots open them with E), loose furniture (shoved aside) or players.
+public bool NB_WorldOnly(int entity, int mask, any data)
+{
+	if (entity == 0)
+		return true;
+	if (entity <= MaxClients || !IsValidEntity(entity))
+		return false;
+	char cls[64];
+	GetEntityClassname(entity, cls, sizeof(cls));
+	if (StrContains(cls, "door") != -1 || StrContains(cls, "prop_physics") != -1 || StrContains(cls, "button") != -1)
+		return false;
+	int parent = HasEntProp(entity, Prop_Data, "m_hMoveParent") ? GetEntPropEnt(entity, Prop_Data, "m_hMoveParent") : -1;
+	if (parent > MaxClients && IsValidEntity(parent))
+	{
+		GetEntityClassname(parent, cls, sizeof(cls));
+		if (StrContains(cls, "door") != -1)
+			return false;          // a door's panel or knob moves with the door
+	}
+	return true;
+}
+
+void NB_Flood(Address start)
+{
+	ArrayList queue = new ArrayList();
+	queue.Push(start);
+	g_nbReach[NavBotNavArea.GetID(start) % NB_MAXID] = true;
+	while (queue.Length > 0)
+	{
+		Address a = queue.Get(queue.Length - 1);
+		queue.Erase(queue.Length - 1);
+		for (int d = 0; d < 4; d++)
+		{
+			int n = NavBotNavArea.GetAdjacentAreaCount(a, view_as<NavBotNavDirType>(d));
+			for (int k = 0; k < n; k++)
+			{
+				Address b = NavBotNavArea.GetAdjacentArea(a, view_as<NavBotNavDirType>(d), k);
+				int id = NavBotNavArea.GetID(b) % NB_MAXID;
+				if (!g_nbReach[id]) { g_nbReach[id] = true; queue.Push(b); }
+			}
+		}
+		int off = NavBotNavArea.GetOffMeshConnectionCount(a);
+		for (int k = 0; k < off; k++)
+		{
+			Address b = NavBotNavOffMeshConnection.GetConnectedArea(NavBotNavArea.GetOffMeshConnection(a, k));
+			if (b == Address_Null) continue;
+			int id = NavBotNavArea.GetID(b) % NB_MAXID;
+			if (!g_nbReach[id]) { g_nbReach[id] = true; queue.Push(b); }
+		}
+	}
+	delete queue;
+}
+
+// Can a player walk in a straight line from a to b? Steps up of at most 18, drops of at most 60.
+bool NB_Walk(const float a[3], const float b[3])
+{
+	float d[3];
+	SubtractVectors(b, a, d);
+	d[2] = 0.0;
+	float len = GetVectorLength(d);
+	int steps = RoundToCeil(len / 6.0);
+	if (steps < 1) steps = 1;
+	float cur[3], prev[3];
+	cur = a;
+	float fmins[3] = { -10.0, -10.0, 0.0 }, fmaxs[3] = { 10.0, 10.0, 2.0 };
+	float hmins[3] = { -14.0, -14.0, 0.0 }, hmaxs[3] = { 14.0, 14.0, 50.0 };
+	for (int i = 1; i <= steps; i++)
+	{
+		prev = cur;
+		float t = float(i) / float(steps);
+		float p[3], q[3];
+		p[0] = a[0] + d[0] * t; p[1] = a[1] + d[1] * t; p[2] = cur[2] + 20.0;
+		q = p; q[2] = cur[2] - 60.0;
+		TR_TraceHullFilter(p, q, fmins, fmaxs, MASK_PLAYERSOLID, NB_WorldOnly);
+		if (!TR_DidHit() || TR_StartSolid())
+			return false;              // a gap, or the step is a wall
+		float end[3];
+		TR_GetEndPosition(end, null);
+		float nrm[3];
+		TR_GetPlaneNormal(null, nrm);
+		if (nrm[2] < 0.7 && end[2] > cur[2] + 2.0)
+			return false;              // a steep slope up, not a step
+		if (end[2] - cur[2] > 18.0)
+			return false;
+		cur[0] = p[0]; cur[1] = p[1]; cur[2] = end[2];
+		// Standing room from the last foot position to this one (above step height, to 68).
+		float s0[3], s1[3];
+		s0 = prev; s0[2] += 19.0;
+		s1 = cur;  s1[2] += 19.0;
+		TR_TraceHullFilter(s0, s1, hmins, hmaxs, MASK_PLAYERSOLID, NB_WorldOnly);
+		if (TR_DidHit() || TR_StartSolid())
+			return false;
+	}
+	return FloatAbs(cur[2] - b[2]) < 20.0;
+}
+
+Action Cmd_NavBridge(int args)
+{
+	if (args < 3) { PrintToServer("usage: sm_navbridge x y z [apply]"); return Plugin_Handled; }
+	float from[3];
+	for (int i = 0; i < 3; i++) from[i] = ArgF(i + 1);
+	char arg[16];
+	GetCmdArg(4, arg, sizeof(arg));
+	bool apply = StrEqual(arg, "apply");
+	float maxDist = args >= 5 ? ArgF(5) : 200.0;
+	Address start = NavBotNavMesh.GetNearestNavArea(from, 200.0, false, true);
+	if (start == Address_Null) { PrintToServer("[navbridge] no area near the start"); return Plugin_Handled; }
+	for (int i = 0; i < NB_MAXID; i++) g_nbReach[i] = false;
+	NB_Flood(start);
+
+	float mins[3] = { -32768.0, -32768.0, -32768.0 }, maxs[3] = { 32768.0, 32768.0, 32768.0 };
+	NavBotNavAreaVector all = NavBotNavMesh.CollectAreasOverlappingExtent(mins, maxs);
+	int total = all.Size, before = 0;
+	for (int i = 0; i < total; i++)
+		if (g_nbReach[NavBotNavArea.GetID(all.At(i)) % NB_MAXID]) before++;
+
+	// Rounds: each links the best (shortest) walkable bridge into every still-unreached area
+	// that has one, then floods from what it reached. Repeat until nothing new.
+	int links = 0;
+	for (int round = 0; round < 12; round++)
+	{
+		int made = 0;
+		for (int i = 0; i < total; i++)
+		{
+			Address u = all.At(i);
+			if (g_nbReach[NavBotNavArea.GetID(u) % NB_MAXID])
+				continue;
+			float uc[3];
+			NavBotNavArea.GetCenter(u, uc);
+			// The walkable candidates, nearest first; link the first one NavBot accepts (it needs
+			// the two areas' edges to overlap on one axis to make a portal).
+			Address cand[8];
+			float candD[8], candP[8][3], candQ[8][3];
+			int nc = 0;
+			for (int j = 0; j < total; j++)
+			{
+				Address r = all.At(j);
+				if (!g_nbReach[NavBotNavArea.GetID(r) % NB_MAXID])
+					continue;
+				float rc[3];
+				NavBotNavArea.GetCenter(r, rc);
+				if (GetVectorDistance(rc, uc) > maxDist + 300.0)
+					continue;
+				float pr[3], pu[3];
+				NavBotNavArea.GetClosestPointOnArea(r, uc, pr);
+				NavBotNavArea.GetClosestPointOnArea(u, pr, pu);
+				NavBotNavArea.GetClosestPointOnArea(r, pu, pr);
+				float dd = GetVectorDistance(pr, pu);
+				if (dd >= maxDist || FloatAbs(pu[2] - pr[2]) > 200.0 || (nc == 8 && dd >= candD[7]))
+					continue;
+				if (!NB_Walk(pr, pu))
+					continue;
+				int at = nc < 8 ? nc++ : 7;
+				while (at > 0 && candD[at - 1] > dd)
+				{
+					cand[at] = cand[at - 1]; candD[at] = candD[at - 1]; candP[at] = candP[at - 1]; candQ[at] = candQ[at - 1];
+					at--;
+				}
+				cand[at] = r; candD[at] = dd; candP[at] = pr; candQ[at] = pu;
+			}
+			int pick = -1;
+			bool back;
+			for (int k = 0; k < nc && pick == -1; k++)
+			{
+				back = NB_Walk(candQ[k], candP[k]);
+				if (!apply)
+					pick = k;
+				else if (NavBotNavArea.IsConnectedToAny(cand[k], u) || NavBotNavArea.ConnectToAdjacent(cand[k], u))
+				{
+					pick = k;
+					if (back && !NavBotNavArea.IsConnectedToAny(u, cand[k]))
+						back = NavBotNavArea.ConnectToAdjacent(u, cand[k]);
+				}
+			}
+			if (pick == -1)
+				continue;
+			Address best = cand[pick];
+			float bp[3], bq[3];
+			bp = candP[pick]; bq = candQ[pick];
+			float bestD = candD[pick];
+			PrintToServer("[navbridge] #%d (%.0f %.0f %.0f) -> #%d (%.0f %.0f %.0f) %.0f units%s", NavBotNavArea.GetID(best), bp[0], bp[1], bp[2],
+				NavBotNavArea.GetID(u), bq[0], bq[1], bq[2], bestD, back ? ", both ways" : ", one way");
+			made++;
+			NB_Flood(u);           // count what this opens up (also in a dry run)
+		}
+		links += made;
+		if (made == 0)
+			break;
+	}
+	int after = 0;
+	for (int i = 0; i < total; i++)
+		if (g_nbReach[NavBotNavArea.GetID(all.At(i)) % NB_MAXID]) after++;
+	PrintToServer("[navbridge] %d bridges: %d -> %d of %d areas reachable%s", links, before, after, total,
+		apply ? " (applied; sv_cheats 1; sm_nav_save to keep)" : " (sm_navbridge x y z apply to link)");
+	delete all;
 	return Plugin_Handled;
 }

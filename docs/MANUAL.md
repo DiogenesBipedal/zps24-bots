@@ -2300,6 +2300,41 @@ entity reference from the last map never matches one on the new map.
 **Rule for new code:** any global `float` that stores a `GetGameTime()` value must be reset in
 `OnMapStart`.
 
+### 11.34 Rural panic: doors only zombies can break, and floors the generator missed
+
+**"The bots are trying to break indestructible doors."** Each house door on zps_ruralpanic is a
+`func_door_rotating` with a 600 hp `func_breakable` panel parented to it. The panel has the damage
+filter `AllowZombies`, so a survivor's hits do nothing, while E on the knob (a `func_button` on the
+door) opens it. The survivor "basement door" rule (11.12: door-shaped breakables below the home's
+floor get smashed) took the panel for a basement door, and twelve bots lined up to hit it forever.
+The new rule, in the player's words: "press E and go in, do not ever try to smash these". For
+survivors, a breakable that's **parented to a door, or has any damage filter**, is never smashed.
+When it's on the path, the bot presses E on its door (`Doors_Use`) and walks through
+(`NoSmashPanel`, `PanelDoor` in zps24_survivors.sp). Zombies still break such panels.
+
+**"Improve the mesh."** `sm_navreach` from the survivor spawn reached 2723 of 3150 areas. The
+house's upper floor and basement and the barn's lofts were islands: their stairs (about 35°) were
+too steep for the generator, as in the church tower (11.5). The fixes, all on the test server:
+- `sm_navfixdrops apply`: 41 drop-downs blocked by railings.
+- `sm_navbuttondoors` was **not** applied here. The doors it lists open with E on their own knob,
+  and removing the links would wall the bots out.
+- New **`sm_navbridge x y z [apply] [maxdist]`** (zps24_navdebug). For every area the start can't
+  reach, it finds the nearest reachable area that a player can really walk to: 6-unit steps, each
+  rise at most 18, drops at most 60, a clear 28x28x50 hull above step height. Doors, buttons,
+  loose furniture and door panels don't count as walls; windows and brush walls do. It links the
+  nearest candidate NavBot accepts (`ConnectToAdjacent` needs the two areas' edges to overlap on one
+  axis, so the first try can fail), back as well if the walk back works too. It repeats until
+  nothing new opens.
+- Result: 7 stair links in total (house stairs and basement stairs, barn stairs to both lofts). The
+  mesh now reaches 3095 of 3150 areas from both spawns, and every new floor connects back down.
+  Saved with `sv_cheats 1; sm_nav_save`. The barn's ladders stay plugin routes (11.10).
+
+`sm_zps24_doorlinks` now also says *why* it skips a door (size, no side areas, world in the way). A
+silent door means it's already linked.
+
+**Lesson.** Before changing a mesh, measure it: `sm_navreach` from both spawns tells you how much
+of the map the bots can use at all. Then fix the biggest island first.
+
 ## 12. The Windows port
 
 The same bots for a ZPS 2.4 dedicated server on **Windows**, in a second repo,

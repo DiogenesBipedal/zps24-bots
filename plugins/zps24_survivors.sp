@@ -949,6 +949,26 @@ public Action OnNavBotObstacleOnPath(NavBot bot, int entity, bool hitWorld, cons
 		return Plugin_Handled;
 	}
 
+	// A breakable panel built into a door, or anything with a damage filter (rural panic's
+	// doors: a 600 hp panel only zombies can hurt). Never smash these: press E and go in.
+	if (StrContains(cls, "breakable") != -1 && NoSmashPanel(entity))
+	{
+		int door = PanelDoor(entity);
+		if (door != -1 && Doors_IsClosed(door) && Doors_Use(client, bot, door))
+			return Plugin_Handled;
+		if (GetGameTime() >= g_nextUse[client])
+		{
+			Address ctrl = bot.GetPlayerControllerInterface();
+			float center[3];
+			EntityCenter(entity, center);
+			NavBotPlayerControllerInterface.AimAtPos(ctrl, center, LOOK_USE, 0.6, "Opening door");
+			NavBotPlayerControllerInterface.PressButtonByID(ctrl, NAVBOT_BUTTON_USE, 0.2);
+			g_nextUse[client] = GetGameTime() + 1.2;
+			Debug("%N presses E on door panel %d", client, entity);
+		}
+		return Plugin_Handled;
+	}
+
 	if (StrContains(cls, "door") != -1)
 	{
 		if (GetGameTime() >= g_nextUse[client])
@@ -1506,9 +1526,29 @@ bool CloseDoorButton(int client, NavBot bot, float moveGoal[3])
 
 // A door-shaped func_breakable (thin, at least door height) whose middle is well below the
 // ground floor of the bot's home: a basement door.
+// The hinged door a breakable panel is parented to, or -1.
+int PanelDoor(int ent)
+{
+	int parent = HasEntProp(ent, Prop_Data, "m_hMoveParent") ? GetEntPropEnt(ent, Prop_Data, "m_hMoveParent") : -1;
+	return parent > MaxClients && IsValidEntity(parent) && Doors_IsHinged(parent) ? parent : -1;
+}
+
+// Survivors never smash it: it's part of a door, or it has a damage filter (zombie-only panels).
+bool NoSmashPanel(int ent)
+{
+	if (PanelDoor(ent) != -1)
+		return true;
+	char filter[64];
+	if (HasEntProp(ent, Prop_Data, "m_iszDamageFilterName"))
+		GetEntPropString(ent, Prop_Data, "m_iszDamageFilterName", filter, sizeof(filter));
+	return filter[0] != '\0';
+}
+
 bool IsBasementDoor(int client, int ent)
 {
 	if (!HasEntProp(ent, Prop_Send, "m_vecMins") || GetEntProp(ent, Prop_Data, "m_iHealth") <= 0)
+		return false;
+	if (NoSmashPanel(ent))
 		return false;
 	float mins[3], maxs[3], c[3];
 	GetEntPropVector(ent, Prop_Send, "m_vecMins", mins);

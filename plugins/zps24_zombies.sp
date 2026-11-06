@@ -2972,9 +2972,13 @@ int LinkDoors(bool verbose)
 		int ent = -1;
 		while ((ent = FindEntityByClassname(ent, classes[c])) != -1)
 		{
-			if (!HasEntProp(ent, Prop_Send, "m_vecMins"))
-				continue;
 			bool isDoor = c <= 2, isPlank = c == 3 || c == 4;
+			if (!HasEntProp(ent, Prop_Send, "m_vecMins"))
+			{
+				if (verbose && isDoor)
+					PrintToServer("[doorlinks] skip door %d: no bounds", ent);
+				continue;
+			}
 			float center[3], mins[3], maxs[3], origin[3];
 			CenterOf(ent, center);
 			GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", origin);
@@ -2982,10 +2986,12 @@ int LinkDoors(bool verbose)
 			GetEntPropVector(ent, Prop_Send, "m_vecMaxs", maxs);
 			float sx = maxs[0] - mins[0], sy = maxs[1] - mins[1], sz = maxs[2] - mins[2];
 			float thin = sx < sy ? sx : sy, wide = sx < sy ? sy : sx;
-			if (thin > 16.0 || wide < 24.0 || wide > 140.0)
+			if (thin > 16.0 || wide < 24.0 || wide > 140.0 || (isDoor && (sz < 50.0 || sz > 160.0)))
+			{
+				if (verbose && isDoor)
+					PrintToServer("[doorlinks] skip door %d: size %.0f x %.0f x %.0f", ent, sx, sy, sz);
 				continue;                    // not an opening-shaped thing
-			if (isDoor && (sz < 50.0 || sz > 160.0))
-				continue;                    // (50: cabin's garage side door is a 55-unit bottom half with a hinged top)
+			}
 			if (!isDoor && !isPlank && (sz < 20.0 || sz > 140.0))
 				continue;
 			float n[3];
@@ -2995,7 +3001,12 @@ int LinkDoors(bool verbose)
 			Address areaA = SideArea(center, n, 1.0, pa);
 			Address areaB = SideArea(center, n, -1.0, pb);
 			if (areaA == Address_Null || areaB == Address_Null || areaA == areaB || FloatAbs(pa[2] - pb[2]) > 24.0)
+			{
+				if (verbose && isDoor)
+					PrintToServer("[doorlinks] skip door %d at %.0f %.0f %.0f: side areas %d / %d (z %.0f / %.0f)", ent, center[0], center[1], center[2],
+						areaA == Address_Null ? -1 : NavBotNavArea.GetID(areaA), areaB == Address_Null ? -1 : NavBotNavArea.GetID(areaB), pa[2], pb[2]);
 				continue;
+			}
 			// Only through the opening: nothing of the world in the way at its middle height.
 			float ma[3], mb[3];
 			ma = pa; mb = pb;
@@ -3003,7 +3014,11 @@ int LinkDoors(bool verbose)
 			ma[2] = midZ; mb[2] = midZ;
 			TR_TraceRayFilter(ma, mb, MASK_SOLID_BRUSHONLY, RayType_EndPoint, TraceWorldOnly);
 			if (TR_DidHit())
+			{
+				if (verbose && isDoor)
+					PrintToServer("[doorlinks] skip door %d at %.0f %.0f %.0f: world in the way", ent, center[0], center[1], center[2]);
 				continue;
+			}
 			float bottom = origin[2] + mins[2];
 			float floorZ = pa[2] > pb[2] ? pa[2] : pb[2];
 			if (!isDoor && bottom - floorZ > CLIMB_MAX)
