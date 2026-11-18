@@ -21,6 +21,14 @@ LOG="$SERVER/server.log"
 HERE="$(dirname "$(readlink -f "$0")")"
 export ZPS24_RCON_PW_FILE="$CONF/rcon.pw"
 LANIP="${ZPS24_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')}"
+# Offline there is no route to the internet, so fall back to any non-loopback address on this PC
+# (Wi-Fi/Ethernet, or docker0's 172.17.0.1, which still works locally with the link down).
+[ -n "$LANIP" ] || LANIP="$(ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/,"",$4); print $4; exit}')"
+if [ -z "$LANIP" ] && [ "${1:-}" = start ]; then
+	echo "No non-loopback IPv4 address found (the 2007 engine can't use 127.x)."
+	echo "Connect to any network, or set one by hand: ZPS24_IP=<addr> $0 start"
+	exit 1
+fi
 export ZPS24_RCON_HOST="$LANIP"
 # The port the server actually got. If something else holds 27015 when it starts (often the ZPS
 # game itself, when it was started first), Source quietly takes the next free port.
