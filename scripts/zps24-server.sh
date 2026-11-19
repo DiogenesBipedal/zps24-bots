@@ -9,7 +9,8 @@
 #   zps24-server.sh log           follow the server console
 #   ZPS24_GDB=1 zps24-server.sh start   run under gdb: crash backtraces in server.log
 #
-# Join from the ZPS 2.4 client console with:  connect <your LAN IP>   (start prints it)
+# Join from the ZPS 2.4 client console with:  connect 172.17.0.1   (start prints the address;
+# it works offline. ZPS24_IP=<LAN IP> zps24-server.sh start lets other PCs on the network join)
 #
 # The server binds to this PC's LAN address, not 127.0.0.1: the 2007 engine treats every 127.x
 # address as its internal loopback and silently drops real UDP packets from it. sv_lan 1 keeps
@@ -20,9 +21,14 @@ CONF="$HOME/.config/zps24"
 LOG="$SERVER/server.log"
 HERE="$(dirname "$(readlink -f "$0")")"
 export ZPS24_RCON_PW_FILE="$CONF/rcon.pw"
-LANIP="${ZPS24_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')}"
-# Offline there is no route to the internet, so fall back to any non-loopback address on this PC
-# (Wi-Fi/Ethernet, or docker0's 172.17.0.1, which still works locally with the link down).
+# Prefer an address that doesn't depend on Wi-Fi, so the server works fully offline and survives
+# Wi-Fi dropping mid-game: a dummy interface "zps0" if one was made, else docker0 (172.17.0.1,
+# up from boot and usable locally even with its link down). Set ZPS24_IP=<LAN IP> to let other
+# PCs on the network join instead.
+iface_ip() { ip -4 -o addr show dev "$1" 2>/dev/null | awk '{sub(/\/.*/,"",$4); print $4; exit}'; }
+LANIP="${ZPS24_IP:-$(iface_ip zps0)}"
+[ -n "$LANIP" ] || LANIP="$(iface_ip docker0)"
+[ -n "$LANIP" ] || LANIP="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
 [ -n "$LANIP" ] || LANIP="$(ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/,"",$4); print $4; exit}')"
 if [ -z "$LANIP" ] && [ "${1:-}" = start ]; then
 	echo "No non-loopback IPv4 address found (the 2007 engine can't use 127.x)."
@@ -50,6 +56,9 @@ start)
 	# Fill every slot but one (yours) with bots.
 	sed -i "s/^sm_navbot_quota_target .*/sm_navbot_quota_target \"$((maxp - 1))\"/" \
 		"$SERVER/zps/cfg/sourcemod/plugin.navbot_quota.cfg" 2>/dev/null || true
+	# Admin (the M menu) is granted by IP; the client connecting to $LANIP shows up from $LANIP.
+	adm="$SERVER/zps/addons/sourcemod/configs/admins_simple.ini"
+	[ -f "$adm" ] && ! grep -q "\"!$LANIP\"" "$adm" && printf '"!%s"\t"99:z"\n' "$LANIP" >> "$adm"
 	cd "$SERVER"
 	# -insecure: SourceMod needs it. sv_lan 1: LAN clients only, and no Steam auth.
 	set -- -game zps -console -insecure +ip "$LANIP" +sv_lan 1 +maxplayers "$maxp" \
